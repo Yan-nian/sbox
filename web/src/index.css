@@ -1,0 +1,105 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg-canvas: #f3f5f8;
+    --bg-surface: #ffffff;
+    --bg-surface-hover: #f8fafc;
+    --bg-recessed: #eaedf2;
+    --border-hairline: #d7dde6;
+    --border-hairline-strong: #bac4d2;
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #64748b;
+    --accent-primary: #0284c7;
+    --accent-primary-muted: rgba(2, 132, 199, 0.12);
+    --accent-upload: #d97706;
+    --signal-ok: #059669;
+    --signal-warn: #d97706;
+    --signal-danger: #dc2626;
+    color-scheme: light;
+  }
+
+  .dark {
+    --bg-canvas: #0c0f14;
+    --bg-surface: #131820;
+    --bg-surface-hover: #19202b;
+    --bg-recessed: #090c10;
+    --border-hairline: #222a36;
+    --border-hairline-strong: #313d4f;
+    --text-primary: #e6edf3;
+    --text-secondary: #909dad;
+    --text-muted: #5d6a7c;
+    --accent-primary: #38bdf8;
+    --accent-primary-muted: rgba(56, 189, 248, 0.14);
+    --accent-upload: #f59e0b;
+    --signal-ok: #10b981;
+    --signal-warn: #f59e0b;
+    --signal-danger: #ef4444;
+    color-scheme: dark;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    background-color: var(--bg-canvas);
+    color: var(--text-primary);
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Precision hairline scrollbar */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-hairline-strong);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Subtle telemetry grid backdrop for recessed chart wells */
+.telemetry-grid {
+  background-image:
+    linear-gradient(to right, var(--border-hairline) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--border-hairline) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+@keyframes led-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.animate-led {
+  animation: led-pulse 2.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-led {
+    animation: none;
+  }
+}

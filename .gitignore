@@ -1,0 +1,28 @@
+# Binaries
+/sbox-panel
+/sbox-panel-*
+/sbox-panel.exe
+*.exe
+*.out
+/dist/
+/bin/
+
+# Runtime data & SQLite databases
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Frontend dependencies (web/dist is kept tracked so `go build` works without Node/npm)
+web/node_modules/
+
+# IDE & OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*.log
+.env
+.env.local
