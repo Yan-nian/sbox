@@ -219,6 +219,8 @@ func (s *Server) buildAPIRouter() chi.Router {
 			r.Get("/inbounds", s.handleListInbounds)
 			r.Get("/inbounds/defaults/{protocol}", s.handleInboundDefaults)
 			r.Get("/inbounds/{id}/links", s.handleInboundLinks)
+			r.Post("/inbounds/check-ports", s.handleCheckAllInboundPorts)
+			r.Post("/inbounds/{id}/check-port", s.handleCheckInboundPort)
 			r.Post("/inbounds", s.handleCreateInbound)
 			r.Put("/inbounds/{id}", s.handleUpdateInbound)
 			r.Post("/inbounds/{id}/toggle", s.handleToggleInbound)

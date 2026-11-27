@@ -513,6 +513,35 @@ export interface InboundLinksResponse {
   items: InboundLinkItem[];
 }
 
+export type InboundPortStatus =
+  | "open"
+  | "local_only"
+  | "local_unverified"
+  | "not_listening"
+  | "node_offline";
+
+export interface InboundPortCheckResult {
+  inbound_id: number;
+  node_id: number;
+  host: string;
+  port: number;
+  network: string;
+  status: InboundPortStatus;
+  local_listening: boolean;
+  external_checked: boolean;
+  external_reachable: boolean;
+  latency_ms: number;
+  probed_by_node_id?: number;
+  probed_by_node_name?: string;
+  message: string;
+  hint?: string;
+  checked_at: string;
+}
+
+export interface InboundPortCheckBatchResponse {
+  results: InboundPortCheckResult[];
+}
+
 export interface SaveInboundRequest {
   node_id?: number;
   name: string;

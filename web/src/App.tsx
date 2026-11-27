@@ -6,7 +6,7 @@ import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { NodeProvider, useNode } from "@/contexts/NodeContext";
 import { ToastProvider } from "@/components/ui/Toast";
 import { Button } from "@/components/ui/primitives";
-import { AppShell, type AppRoute } from "@/components/AppShell";
+import { AppShell, getViewMode, type AppRoute } from "@/components/AppShell";
 import { useDashboardStream } from "@/hooks/useDashboardStream";
 import { SetupPage } from "@/pages/SetupPage";
 import { LoginPage } from "@/pages/LoginPage";
@@ -23,27 +23,30 @@ import { SettingsPage } from "@/pages/SettingsPage";
 
 const VALID_ROUTES: ReadonlySet<AppRoute> = new Set([
   "/",
-  "/nodes",
-  "/inbounds",
   "/members",
+  "/subscriptions",
+  "/settings",
+  "/node/dashboard",
+  "/inbounds",
   "/certs",
   "/routing",
-  "/subscriptions",
   "/core",
   "/connections",
-  "/settings",
 ]);
 
 function parseRoute(): AppRoute {
   const rel = getRelativeRoute();
+  if (rel === "/nodes") return "/";
   if (rel === "/sync") return "/subscriptions";
+  if (rel === "/dashboard") return "/node/dashboard";
   return VALID_ROUTES.has(rel as AppRoute) ? (rel as AppRoute) : "/";
 }
 
 function WorkspaceShell() {
   const [route, setRoute] = useState<AppRoute>(() => parseRoute());
   const { activeNodeId } = useNode();
-  const live = useDashboardStream(true, activeNodeId);
+  const viewMode = getViewMode(route);
+  const live = useDashboardStream(viewMode === "node", activeNodeId);
 
   useEffect(() => {
     const onPopState = () => setRoute(parseRoute());
@@ -67,16 +70,19 @@ function WorkspaceShell() {
       metrics={live.metrics}
       sseConnected={live.connected}
     >
-      {route === "/" && <DashboardPage live={live} onNavigate={navigate} />}
-      {route === "/nodes" && <NodesPage onNavigate={navigate} />}
-      {route === "/inbounds" && <InboundsPage onNavigate={navigate} />}
+      {/* Master Mode Pages */}
+      {route === "/" && <NodesPage onNavigate={navigate} />}
       {route === "/members" && <MembersPage />}
+      {route === "/subscriptions" && <SubscriptionsPage />}
+      {route === "/settings" && <SettingsPage />}
+
+      {/* Node Mode Pages */}
+      {route === "/node/dashboard" && <DashboardPage live={live} onNavigate={navigate} />}
+      {route === "/inbounds" && <InboundsPage onNavigate={navigate} />}
       {route === "/certs" && <CertificatesPage onNavigate={navigate} />}
       {route === "/routing" && <RoutingPage onNavigate={navigate} />}
-      {route === "/subscriptions" && <SubscriptionsPage />}
       {route === "/core" && <CoreLogsPage live={live} onNavigate={navigate} />}
       {route === "/connections" && <ConnectionsPage onNavigate={navigate} />}
-      {route === "/settings" && <SettingsPage />}
     </AppShell>
   );
 }

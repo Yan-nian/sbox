@@ -756,6 +756,28 @@ func (a *agentRunner) handleRPC(agentCtx, sessionCtx context.Context, sess *agen
 			cancel()
 		}
 
+	case MethodNetCheckLocalPort:
+		var p localPortCheckReq
+		if err = json.Unmarshal(req.Payload, &p); err == nil {
+			opCtx, cancel := context.WithTimeout(sessionCtx, 8*time.Second)
+			resp, err = CheckLocalPort(opCtx, p.Network, p.Port)
+			cancel()
+		}
+
+	case MethodNetProbeExternalPort:
+		var p ExternalPortProbeRequest
+		if err = json.Unmarshal(req.Payload, &p); err == nil {
+			timeout := 10 * time.Second
+			if p.TimeoutMS > 0 {
+				if want := time.Duration(p.TimeoutMS)*time.Millisecond + 3*time.Second; want > timeout {
+					timeout = want
+				}
+			}
+			opCtx, cancel := context.WithTimeout(sessionCtx, timeout)
+			resp, err = ProbeExternalPort(opCtx, p)
+			cancel()
+		}
+
 	case rpcToolsRealityProbe:
 		var p realityProbeReq
 		if err = json.Unmarshal(req.Payload, &p); err == nil {

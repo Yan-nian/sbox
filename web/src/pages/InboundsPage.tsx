@@ -1,17 +1,22 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertTriangle,
   Check,
+  CheckCircle2,
   Copy,
   Edit3,
   Globe,
   Link2,
   Loader2,
   Plus,
+  Radar,
   Radio,
   RefreshCw,
   Shield,
   Trash2,
   Users,
+  WifiOff,
+  XCircle,
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { copyToClipboard } from "@/lib/clipboard";
@@ -34,6 +39,7 @@ import type {
   CertificateItem,
   InboundItem,
   InboundLinkItem,
+  InboundPortCheckResult,
   MemberItem,
 } from "@/types/api";
 
@@ -92,7 +98,27 @@ export function InboundsPage({ onNavigate }: { onNavigate?: (route: AppRoute) =>
   const [linkFormat, setLinkFormat] = useState<"uri" | "loon">("uri");
   const [copiedLinkKey, setCopiedLinkKey] = useState<string | null>(null);
 
+  // Cross-node port reachability check state
+  const [portResults, setPortResults] = useState<Record<number, InboundPortCheckResult>>({});
+  const [checkingPorts, setCheckingPorts] = useState<Record<number, boolean>>({});
+  const [checkingAllPorts, setCheckingAllPorts] = useState(false);
+  const [expandedHintId, setExpandedHintId] = useState<number | null>(null);
+  const pendingTimersRef = useRef<number[]>([]);
+
   const nodeOffline = activeNode ? !activeNode.online : false;
+
+  useEffect(() => {
+    setPortResults({});
+    setCheckingPorts({});
+    setExpandedHintId(null);
+  }, [activeNodeId]);
+
+  useEffect(() => {
+    const timers = pendingTimersRef.current;
+    return () => {
+      for (const t of timers) window.clearTimeout(t);
+    };
+  }, []);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -134,6 +160,97 @@ export function InboundsPage({ onNavigate }: { onNavigate?: (route: AppRoute) =>
     return { active, up, down };
   }, [inbounds]);
 
+  const runCheckSinglePort = useCallback(
+    async (id: number, showToast = false) => {
+      setCheckingPorts((prev) => ({ ...prev, [id]: true }));
+      try {
+        const res = await api.checkInboundPort(id);
+        setPortResults((prev) => ({ ...prev, [id]: res }));
+        if (showToast) {
+          if (res.status === "open") {
+            toast.success(
+              `端口 ${res.port} 公网通 · ${res.latency_ms}ms`,
+              res.probed_by_node_name
+                ? `由 ${res.probed_by_node_name} 跨机探测`
+                : res.message,
+            );
+          } else if (res.status === "local_only") {
+            toast.error(`端口 ${res.port} 仅本机监听 · 公网未通`, res.hint || res.message);
+          } else if (res.status === "not_listening") {
+            toast.error(`端口 ${res.port} 未监听`, res.hint || res.message);
+          } else if (res.status === "node_offline") {
+            toast.error("节点离线，无法探测端口", res.message);
+          } else {
+            toast.info(`端口 ${res.port} 本机已监听`, res.hint || res.message);
+          }
+        }
+      } catch (err) {
+        if (showToast) {
+          toast.error("端口检测失败", err instanceof ApiError ? err.message : undefined);
+        }
+      } finally {
+        setCheckingPorts((prev) => ({ ...prev, [id]: false }));
+      }
+    },
+    [toast],
+  );
+
+  const scheduleAutoPortCheck = useCallback(
+    (id: number) => {
+      setCheckingPorts((prev) => ({ ...prev, [id]: true }));
+      const timer = window.setTimeout(() => {
+        pendingTimersRef.current = pendingTimersRef.current.filter((t) => t !== timer);
+        void runCheckSinglePort(id, false);
+      }, 1200);
+      pendingTimersRef.current.push(timer);
+    },
+    [runCheckSinglePort],
+  );
+
+  const runCheckAllPorts = async () => {
+    const enabledIds = inbounds.filter((ib) => ib.enabled).map((ib) => ib.id);
+    if (enabledIds.length === 0) return;
+
+    setCheckingAllPorts(true);
+    setCheckingPorts((prev) => {
+      const next = { ...prev };
+      for (const id of enabledIds) next[id] = true;
+      return next;
+    });
+
+    try {
+      const res = await api.checkAllInboundPorts(activeNodeId);
+      const list = Array.isArray(res.results) ? res.results : [];
+      setPortResults((prev) => {
+        const next = { ...prev };
+        for (const item of list) {
+          next[item.inbound_id] = item;
+        }
+        return next;
+      });
+      const openCount = list.filter((r) => r.status === "open").length;
+      const localOnlyCount = list.filter((r) => r.status === "local_only").length;
+      const failCount = list.filter((r) => r.status === "not_listening").length;
+      if (localOnlyCount > 0 || failCount > 0) {
+        toast.info(
+          `端口检测完成 (${list.length} 个入站)`,
+          `公网通 ${openCount} · 仅本机监听 ${localOnlyCount} · 未监听 ${failCount}`,
+        );
+      } else {
+        toast.success(`已完成 ${list.length} 个入站端口检测`);
+      }
+    } catch (err) {
+      toast.error("批量检测端口失败", err instanceof ApiError ? err.message : undefined);
+    } finally {
+      setCheckingAllPorts(false);
+      setCheckingPorts((prev) => {
+        const next = { ...prev };
+        for (const id of enabledIds) next[id] = false;
+        return next;
+      });
+    }
+  };
+
   const handleToggle = async (ib: InboundItem) => {
     setBusyId(ib.id);
     try {
@@ -143,10 +260,26 @@ export function InboundsPage({ onNavigate }: { onNavigate?: (route: AppRoute) =>
         updated.enabled ? `已启用入站 ${ib.name}` : `已停用入站 ${ib.name}`,
         "配置已重新编译并应用",
       );
+      if (updated.enabled && !nodeOffline) {
+        scheduleAutoPortCheck(updated.id);
+      } else if (!updated.enabled) {
+        setPortResults((prev) => {
+          const next = { ...prev };
+          delete next[ib.id];
+          return next;
+        });
+      }
     } catch (err) {
       toast.error("切换入站状态失败", err instanceof ApiError ? err.message : undefined);
     } finally {
       setBusyId(null);
+    }
+  };
+
+  const handleInboundSaved = async (saved?: InboundItem) => {
+    await loadAll();
+    if (saved && saved.enabled && !nodeOffline) {
+      scheduleAutoPortCheck(saved.id);
     }
   };
 
@@ -231,7 +364,18 @@ export function InboundsPage({ onNavigate }: { onNavigate?: (route: AppRoute) =>
         title="多协议入站节点栈"
         description="支持 VLESS Reality/Vision、Hysteria2、TUIC v5、AnyTLS、SS-2022、Trojan、ShadowTLS v3 与端口转发"
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={checkingAllPorts}
+              disabled={loading || summary.active === 0 || nodeOffline || checkingAllPorts}
+              onClick={() => void runCheckAllPorts()}
+              title="检测当前节点所有已启用入站的本地监听与跨机公网连通性"
+            >
+              <Radar className="h-3.5 w-3.5" />
+              检测全部端口
+            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -367,6 +511,120 @@ export function InboundsPage({ onNavigate }: { onNavigate?: (route: AppRoute) =>
                             )}
                           </div>
                         )}
+
+                        {/* Port Reachability Status Badge & Quick Re-Check */}
+                        {ib.enabled && (
+                          <div className="mt-1.5 space-y-1 font-sans">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {checkingPorts[ib.id] ? (
+                                <Badge tone="accent">
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                  测端口中...
+                                </Badge>
+                              ) : portResults[ib.id] ? (
+                                (() => {
+                                  const pr = portResults[ib.id];
+                                  const tooltip =
+                                    pr.status === "open"
+                                      ? pr.probed_by_node_name
+                                        ? `由 ${pr.probed_by_node_name} 跨机探测 (${pr.message || `${pr.latency_ms}ms`})`
+                                        : pr.message || "公网连通"
+                                      : [pr.message, pr.hint].filter(Boolean).join(" · ");
+
+                                  const badgeTone =
+                                    pr.status === "open"
+                                      ? "ok"
+                                      : pr.status === "local_only"
+                                        ? "warn"
+                                        : pr.status === "local_unverified"
+                                          ? "accent"
+                                          : pr.status === "not_listening"
+                                            ? "danger"
+                                            : "neutral";
+
+                                  return (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setExpandedHintId((curr) =>
+                                          curr === ib.id ? null : ib.id,
+                                        )
+                                      }
+                                      title={tooltip}
+                                      className="inline-flex text-left focus:outline-none"
+                                    >
+                                      <Badge tone={badgeTone} className="cursor-pointer">
+                                        {pr.status === "open" && (
+                                          <>
+                                            <CheckCircle2 className="h-3 w-3" />
+                                            <span className="font-mono tabular-nums">
+                                              公网通 · {pr.latency_ms}ms
+                                            </span>
+                                          </>
+                                        )}
+                                        {pr.status === "local_only" && (
+                                          <>
+                                            <AlertTriangle className="h-3 w-3" />
+                                            <span>仅本机监听 · 公网未通</span>
+                                          </>
+                                        )}
+                                        {pr.status === "local_unverified" && (
+                                          <>
+                                            <CheckCircle2 className="h-3 w-3" />
+                                            <span>本机已监听</span>
+                                          </>
+                                        )}
+                                        {pr.status === "not_listening" && (
+                                          <>
+                                            <XCircle className="h-3 w-3" />
+                                            <span>未监听</span>
+                                          </>
+                                        )}
+                                        {pr.status === "node_offline" && (
+                                          <>
+                                            <WifiOff className="h-3 w-3" />
+                                            <span>节点离线</span>
+                                          </>
+                                        )}
+                                      </Badge>
+                                    </button>
+                                  );
+                                })()
+                              ) : null}
+
+                              <button
+                                type="button"
+                                disabled={Boolean(checkingPorts[ib.id]) || nodeOffline}
+                                onClick={() => void runCheckSinglePort(ib.id, true)}
+                                title={portResults[ib.id] ? "重新检测端口连通性" : "检测端口监听与公网放行状态"}
+                                className="inline-flex items-center gap-1 rounded border border-hairline bg-recessed px-1.5 py-0.5 text-[10px] font-medium text-ink-secondary transition-colors hover:border-accent/50 hover:text-accent disabled:pointer-events-none disabled:opacity-45"
+                              >
+                                <Radar className="h-3 w-3" />
+                                <span>测端口</span>
+                              </button>
+                            </div>
+
+                            {/* Always show actionable firewall hint for local_only / not_listening, or when clicked */}
+                            {!checkingPorts[ib.id] &&
+                              portResults[ib.id] &&
+                              (portResults[ib.id].status === "local_only" ||
+                                portResults[ib.id].status === "not_listening" ||
+                                expandedHintId === ib.id) && (
+                                <div
+                                  className={cn(
+                                    "max-w-[260px] text-[10px] leading-snug",
+                                    portResults[ib.id].status === "local_only"
+                                      ? "text-warn"
+                                      : portResults[ib.id].status === "not_listening"
+                                        ? "text-danger"
+                                        : "text-ink-muted",
+                                  )}
+                                >
+                                  {portResults[ib.id].hint || portResults[ib.id].message}
+                                </div>
+                              )}
+                          </div>
+                        )}
                       </td>
 
                       <td className="px-3 py-3">
@@ -467,7 +725,7 @@ export function InboundsPage({ onNavigate }: { onNavigate?: (route: AppRoute) =>
         certificates={certificates}
         members={members}
         onClose={() => setModalOpen(false)}
-        onSaved={loadAll}
+        onSaved={handleInboundSaved}
       />
 
       {/* Quick Copy Node Links Modal */}

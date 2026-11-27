@@ -69,7 +69,10 @@ export function useDashboardStream(enabled: boolean, nodeId: number): DashboardL
   }, [nodeId]);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) {
+      setConnected(false);
+      return;
+    }
 
     // Reset transient state when switching active node
     setLoading(true);

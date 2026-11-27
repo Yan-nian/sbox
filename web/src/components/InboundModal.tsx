@@ -72,7 +72,7 @@ interface InboundModalProps {
   certificates: CertificateItem[];
   members: MemberItem[];
   onClose: () => void;
-  onSaved: () => Promise<void>;
+  onSaved: (saved?: InboundItem) => Promise<void> | void;
 }
 
 export function InboundModal({
@@ -301,15 +301,16 @@ export function InboundModal({
 
     setSaving(true);
     try {
+      let saved: InboundItem;
       if (editing) {
-        await api.updateInbound(editing.id, payload);
+        saved = await api.updateInbound(editing.id, payload);
         toast.success("入站节点已更新", "已重新编译 sing-box 配置");
       } else {
-        await api.createInbound(payload);
+        saved = await api.createInbound(payload);
         toast.success("入站节点已创建", "已自动编译并应用至 sing-box");
       }
       onClose();
-      await onSaved();
+      await onSaved(saved);
     } catch (err) {
       toast.error(
         editing ? "更新入站失败" : "创建入站失败",

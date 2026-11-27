@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   Activity,
   ArrowDown,
+  ArrowLeft,
   ArrowUp,
   Check,
   ChevronDown,
@@ -31,17 +32,19 @@ import { useNode } from "@/contexts/NodeContext";
 import { Badge, Button, StatusDot } from "@/components/ui/primitives";
 import type { CoreStatus, MetricsSnapshot } from "@/types/api";
 
-export type AppRoute =
-  | "/"
-  | "/nodes"
+export type ViewMode = "master" | "node";
+
+export type MasterRoute = "/" | "/members" | "/subscriptions" | "/settings";
+
+export type NodeRoute =
+  | "/node/dashboard"
   | "/inbounds"
-  | "/members"
   | "/certs"
   | "/routing"
-  | "/subscriptions"
   | "/core"
-  | "/connections"
-  | "/settings";
+  | "/connections";
+
+export type AppRoute = MasterRoute | NodeRoute;
 
 interface NavItem {
   route: AppRoute;
@@ -49,30 +52,44 @@ interface NavItem {
   icon: React.ComponentType<{ className?: string }>;
 }
 
-export const ACTIVE_NAV_ITEMS: NavItem[] = [
-  { route: "/", label: "仪表盘", icon: Activity },
-  { route: "/nodes", label: "节点管理", icon: Server },
-  { route: "/inbounds", label: "入站节点", icon: Radio },
+export const MASTER_NAV_ITEMS: NavItem[] = [
+  { route: "/", label: "集群与节点", icon: Server },
   { route: "/members", label: "成员管理", icon: Users },
-  { route: "/certs", label: "证书中心", icon: Shield },
-  { route: "/routing", label: "出站与分流", icon: GitBranch },
   { route: "/subscriptions", label: "远端同步", icon: CloudUpload },
-  { route: "/core", label: "核心与日志", icon: Cpu },
-  { route: "/connections", label: "活跃连接", icon: Network },
   { route: "/settings", label: "安全与设置", icon: Settings },
 ];
 
+export const NODE_NAV_ITEMS: NavItem[] = [
+  { route: "/node/dashboard", label: "节点仪表盘", icon: Activity },
+  { route: "/inbounds", label: "入站节点", icon: Radio },
+  { route: "/certs", label: "证书中心", icon: Shield },
+  { route: "/routing", label: "出站与分流", icon: GitBranch },
+  { route: "/core", label: "核心与日志", icon: Cpu },
+  { route: "/connections", label: "活跃连接", icon: Network },
+];
+
+const MASTER_ROUTE_SET: ReadonlySet<AppRoute> = new Set([
+  "/",
+  "/members",
+  "/subscriptions",
+  "/settings",
+]);
+
+export function getViewMode(route: AppRoute): ViewMode {
+  return MASTER_ROUTE_SET.has(route) ? "master" : "node";
+}
+
 const ROUTE_TITLES: Record<AppRoute, string> = {
-  "/": "仪表盘",
-  "/nodes": "节点管理",
-  "/inbounds": "入站节点",
+  "/": "集群与节点",
   "/members": "成员管理",
+  "/subscriptions": "远端同步",
+  "/settings": "安全与设置",
+  "/node/dashboard": "节点仪表盘",
+  "/inbounds": "入站节点",
   "/certs": "证书中心",
   "/routing": "出站与分流",
-  "/subscriptions": "远端同步",
   "/core": "核心与日志",
   "/connections": "活跃连接",
-  "/settings": "安全与设置",
 };
 
 interface AppShellProps {
@@ -95,16 +112,27 @@ export function AppShell({
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [nodeMenuOpen, setNodeMenuOpen] = useState(false);
-  const nodeMenuRef = useRef<HTMLDivElement | null>(null);
+  const desktopSwitcherRef = useRef<HTMLDivElement | null>(null);
+  const mobileSwitcherRef = useRef<HTMLDivElement | null>(null);
 
   const { theme, toggleTheme } = useTheme();
   const { status, logout } = useAuth();
   const { nodes, activeNode, activeNodeId, setActiveNodeId } = useNode();
 
+  const viewMode = getViewMode(route);
+  const navItems = viewMode === "master" ? MASTER_NAV_ITEMS : NODE_NAV_ITEMS;
+
+  useEffect(() => {
+    setNodeMenuOpen(false);
+  }, [viewMode]);
+
   useEffect(() => {
     if (!nodeMenuOpen) return;
     const onDown = (e: MouseEvent) => {
-      if (nodeMenuRef.current && !nodeMenuRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      const insideDesktop = desktopSwitcherRef.current?.contains(target);
+      const insideMobile = mobileSwitcherRef.current?.contains(target);
+      if (!insideDesktop && !insideMobile) {
         setNodeMenuOpen(false);
       }
     };
@@ -150,7 +178,10 @@ export function AppShell({
 
   const onlineCount = nodes.filter((n) => n.online).length;
 
-  const renderSidebarContent = (isCompact: boolean) => (
+  const renderSidebarContent = (
+    isCompact: boolean,
+    switcherRef: React.RefObject<HTMLDivElement | null>,
+  ) => (
     <div className="flex h-full flex-col">
       {/* Brand header */}
       <div
@@ -163,6 +194,7 @@ export function AppShell({
           type="button"
           onClick={() => handleSelect("/")}
           className="flex items-center gap-2.5 text-left focus:outline-none"
+          title="返回主控集群面板"
         >
           <svg className="h-7 w-7 shrink-0" viewBox="0 0 32 32" aria-hidden="true">
             <rect
@@ -188,9 +220,11 @@ export function AppShell({
                 sbox-panel
               </div>
               <div className="truncate font-mono text-[10px] text-ink-muted">
-                {nodes.length > 1
-                  ? `多机集群 · ${onlineCount}/${nodes.length} 在线`
-                  : "sing-box 1.12+"}
+                {viewMode === "master"
+                  ? nodes.length > 1
+                    ? `主控集群 · ${onlineCount}/${nodes.length} 在线`
+                    : "主控集群 · sing-box"
+                  : `节点视图 · ${activeNode?.name || "local"}`}
               </div>
             </div>
           )}
@@ -209,16 +243,155 @@ export function AppShell({
         )}
       </div>
 
-      {/* Navigation groups */}
-      <nav className="flex-1 space-y-5 overflow-y-auto px-2.5 py-4" aria-label="主导航">
+      {/* Node Mode Context Bar: Back to Master + Inline Active Node Quick-Switcher */}
+      {viewMode === "node" && (
+        <div
+          className={cn(
+            "border-b border-hairline",
+            isCompact ? "flex flex-col items-center gap-2 p-2" : "space-y-2 p-2.5",
+          )}
+        >
+          <button
+            type="button"
+            onClick={() => handleSelect("/")}
+            title="返回主控面板"
+            className={cn(
+              "flex items-center gap-2 rounded-md border border-hairline bg-recessed text-xs font-medium text-ink-secondary transition-colors hover:border-hairline-strong hover:bg-surface-hover hover:text-ink",
+              isCompact ? "h-8 w-8 justify-center p-0" : "w-full px-2.5 py-1.5",
+            )}
+          >
+            <ArrowLeft className="h-3.5 w-3.5 shrink-0 text-accent" />
+            {!isCompact && <span>返回主控面板</span>}
+          </button>
+
+          {activeNode && (
+            <div ref={switcherRef} className="relative w-full">
+              <button
+                type="button"
+                onClick={() => setNodeMenuOpen((o) => !o)}
+                title={isCompact ? `切换节点 (${activeNode.name})` : undefined}
+                aria-expanded={nodeMenuOpen}
+                aria-haspopup="listbox"
+                className={cn(
+                  "flex items-center justify-between gap-2 rounded-md border transition-colors",
+                  isCompact ? "mx-auto h-8 w-8 justify-center p-0" : "w-full px-2.5 py-2 text-left",
+                  nodeMenuOpen
+                    ? "border-accent bg-accent-muted text-ink"
+                    : "border-hairline-strong bg-recessed/90 text-ink hover:border-accent/60",
+                )}
+              >
+                {isCompact ? (
+                  <StatusDot state={activeNode.online ? "ok" : "idle"} />
+                ) : (
+                  <>
+                    <div className="flex min-w-0 items-center gap-2">
+                      <StatusDot state={activeNode.online ? "ok" : "idle"} />
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="truncate font-mono text-xs font-semibold text-ink">
+                            {activeNode.name}
+                          </span>
+                          <span className="shrink-0 rounded border border-hairline bg-surface px-1 py-0.2 font-mono text-[10px] text-ink-secondary">
+                            {activeNode.is_local ? "本机" : "远端"}
+                          </span>
+                        </div>
+                        <div className="mt-0.5 truncate font-mono text-[10px] text-ink-muted">
+                          {activeNode.public_ipv4 || (activeNode.online ? "在线" : "离线")}
+                        </div>
+                      </div>
+                    </div>
+                    <ChevronDown
+                      className={cn(
+                        "h-3.5 w-3.5 shrink-0 text-ink-muted transition-transform",
+                        nodeMenuOpen && "rotate-180",
+                      )}
+                    />
+                  </>
+                )}
+              </button>
+
+              {nodeMenuOpen && (
+                <div
+                  role="listbox"
+                  className={cn(
+                    "absolute z-40 mt-1.5 w-64 overflow-hidden rounded-lg border border-hairline-strong bg-surface shadow-2xl",
+                    isCompact ? "left-full top-0 ml-2 mt-0" : "left-0 right-0 top-full w-auto min-w-[224px]",
+                  )}
+                >
+                  <div className="flex items-center justify-between border-b border-hairline bg-recessed px-3 py-2 text-[11px] text-ink-secondary">
+                    <span>快速切换管理节点</span>
+                    <span className="font-mono tabular-nums">
+                      {onlineCount}/{nodes.length} 在线
+                    </span>
+                  </div>
+
+                  <div className="max-h-64 overflow-y-auto p-1">
+                    {nodes.map((n) => {
+                      const selected = n.id === activeNodeId;
+                      return (
+                        <button
+                          key={n.id}
+                          type="button"
+                          role="option"
+                          aria-selected={selected}
+                          onClick={() => {
+                            setActiveNodeId(n.id);
+                            setNodeMenuOpen(false);
+                            setMobileOpen(false);
+                          }}
+                          className={cn(
+                            "flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-2 text-left text-xs transition-colors",
+                            selected
+                              ? "bg-accent-muted text-ink"
+                              : "text-ink-secondary hover:bg-surface-hover hover:text-ink",
+                          )}
+                        >
+                          <div className="flex min-w-0 items-center gap-2">
+                            <StatusDot state={n.online ? "ok" : "idle"} />
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5">
+                                <span className="truncate font-mono font-medium text-ink">
+                                  {n.name}
+                                </span>
+                                <Badge
+                                  tone={n.is_local ? "accent" : "neutral"}
+                                  className="px-1 py-0 text-[10px]"
+                                >
+                                  {n.is_local ? "本机" : "远端"}
+                                </Badge>
+                              </div>
+                              <div className="mt-0.5 truncate font-mono text-[10px] text-ink-muted">
+                                {n.online
+                                  ? `${n.public_ipv4 || `${n.os || "?"}/${n.arch || "?"}`} · ${n.core_version || "无核心"}`
+                                  : "Agent 离线"}
+                              </div>
+                            </div>
+                          </div>
+                          {selected && <Check className="h-3.5 w-3.5 shrink-0 text-accent" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Navigation list (strictly separated by viewMode) */}
+      <nav
+        className="flex-1 space-y-5 overflow-y-auto px-2.5 py-4"
+        aria-label={viewMode === "master" ? "主控集群导航" : "节点控制导航"}
+      >
         <div>
           {!isCompact && (
             <div className="mb-1.5 px-2.5 text-[11px] font-medium text-ink-muted">
-              核心控制
+              {viewMode === "master" ? "主控集群" : "节点控制"}
             </div>
           )}
           <div className="space-y-0.5">
-            {ACTIVE_NAV_ITEMS.map((item) => {
+            {navItems.map((item) => {
               const Icon = item.icon;
               const active = route === item.route;
               return (
@@ -239,7 +412,7 @@ export function AppShell({
                     <Icon className="h-4 w-4 shrink-0" />
                     {!isCompact && <span className="truncate">{item.label}</span>}
                   </span>
-                  {!isCompact && item.route === "/nodes" && nodes.length > 0 && (
+                  {!isCompact && item.route === "/" && nodes.length > 0 && (
                     <span className="rounded border border-hairline bg-recessed px-1.5 py-0.2 font-mono text-[10px] text-ink-secondary tabular-nums">
                       {onlineCount}/{nodes.length}
                     </span>
@@ -314,7 +487,9 @@ export function AppShell({
           collapsed ? "w-16" : "w-60",
         )}
       >
-        <div className="sticky top-0 h-screen">{renderSidebarContent(collapsed)}</div>
+        <div className="sticky top-0 h-screen">
+          {renderSidebarContent(collapsed, desktopSwitcherRef)}
+        </div>
       </aside>
 
       {/* Mobile drawer */}
@@ -333,14 +508,14 @@ export function AppShell({
             >
               <X className="h-4 w-4" />
             </button>
-            {renderSidebarContent(false)}
+            {renderSidebarContent(false, mobileSwitcherRef)}
           </aside>
         </div>
       )}
 
       {/* Main viewport */}
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Top instrument utility strip */}
+        {/* Top instrument utility strip (strictly separated by Master vs Node mode) */}
         <header className="sticky top-0 z-20 flex h-14 items-center justify-between gap-2.5 border-b border-hairline bg-surface/95 px-4 backdrop-blur-sm sm:px-6">
           <div className="flex min-w-0 items-center gap-3">
             <button
@@ -355,140 +530,67 @@ export function AppShell({
               {ROUTE_TITLES[route]}
             </h1>
 
-            {/* Node Context Switcher */}
-            {activeNode && (
-              <div ref={nodeMenuRef} className="relative">
-                <button
-                  type="button"
-                  onClick={() => setNodeMenuOpen((o) => !o)}
-                  className={cn(
-                    "inline-flex items-center gap-2 rounded-md border px-2.5 py-1 text-xs transition-colors",
-                    nodeMenuOpen
-                      ? "border-accent bg-accent-muted text-ink"
-                      : "border-hairline bg-recessed text-ink hover:border-hairline-strong",
-                  )}
-                  aria-expanded={nodeMenuOpen}
-                  aria-haspopup="listbox"
-                >
-                  <StatusDot state={activeNode.online ? "ok" : "idle"} />
-                  <span className="max-w-[110px] truncate font-mono font-medium sm:max-w-[150px]">
-                    {activeNode.name}
-                  </span>
-                  <span className="hidden rounded border border-hairline bg-surface px-1 py-0.2 font-mono text-[10px] text-ink-secondary sm:inline">
-                    {activeNode.is_local ? "本机" : "远端"}
-                  </span>
-                  <ChevronDown className="h-3.5 w-3.5 text-ink-muted" />
-                </button>
-
-                {nodeMenuOpen && (
-                  <div
-                    role="listbox"
-                    className="absolute left-0 top-full z-40 mt-1.5 w-72 overflow-hidden rounded-lg border border-hairline-strong bg-surface shadow-2xl"
-                  >
-                    <div className="flex items-center justify-between border-b border-hairline bg-recessed px-3 py-2 text-[11px] text-ink-secondary">
-                      <span>切换受控节点</span>
-                      <span className="font-mono tabular-nums">
-                        {onlineCount}/{nodes.length} 在线
-                      </span>
-                    </div>
-
-                    <div className="max-h-64 overflow-y-auto p-1">
-                      {nodes.map((n) => {
-                        const selected = n.id === activeNodeId;
-                        return (
-                          <button
-                            key={n.id}
-                            type="button"
-                            role="option"
-                            aria-selected={selected}
-                            onClick={() => {
-                              setActiveNodeId(n.id);
-                              setNodeMenuOpen(false);
-                            }}
-                            className={cn(
-                              "flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-2 text-left text-xs transition-colors",
-                              selected
-                                ? "bg-accent-muted text-ink"
-                                : "hover:bg-surface-hover text-ink-secondary hover:text-ink",
-                            )}
-                          >
-                            <div className="flex min-w-0 items-center gap-2">
-                              <StatusDot state={n.online ? "ok" : "idle"} />
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-1.5">
-                                  <span className="truncate font-mono font-medium text-ink">
-                                    {n.name}
-                                  </span>
-                                  <Badge
-                                    tone={n.is_local ? "accent" : "neutral"}
-                                    className="px-1 py-0 text-[10px]"
-                                  >
-                                    {n.is_local ? "本机" : "远端"}
-                                  </Badge>
-                                </div>
-                                <div className="mt-0.5 truncate font-mono text-[10px] text-ink-muted">
-                                  {n.online
-                                    ? `${n.os || "?"}/${n.arch || "?"} · ${n.core_version || "无核心"}`
-                                    : "Agent 离线"}
-                                </div>
-                              </div>
-                            </div>
-                            {selected && <Check className="h-3.5 w-3.5 shrink-0 text-accent" />}
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    <div className="border-t border-hairline bg-recessed/70 p-1.5">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setNodeMenuOpen(false);
-                          handleSelect("/nodes");
-                        }}
-                        className="flex w-full items-center justify-center gap-1.5 rounded px-2 py-1.5 text-xs font-medium text-accent hover:bg-surface"
-                      >
-                        <Server className="h-3.5 w-3.5" />
-                        节点管理与添加远程 VPS
-                      </button>
-                    </div>
-                  </div>
-                )}
+            {/* Node Mode active node identity badge */}
+            {viewMode === "node" && activeNode && (
+              <div className="inline-flex items-center gap-1.5 rounded-md border border-hairline bg-recessed px-2 py-0.5 text-xs">
+                <StatusDot state={activeNode.online ? "ok" : "idle"} className="h-1.5 w-1.5" />
+                <span className="max-w-[120px] truncate font-mono font-medium text-ink sm:max-w-[160px]">
+                  {activeNode.name}
+                </span>
+                <span className="hidden rounded border border-hairline bg-surface px-1 text-[10px] text-ink-secondary sm:inline">
+                  {activeNode.is_local ? "本机" : "远端"}
+                </span>
               </div>
             )}
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3">
-            {/* Compact live speed pill */}
-            <div className="hidden items-center gap-3 rounded-md border border-hairline bg-recessed px-2.5 py-1 font-mono text-xs tabular-nums xl:flex">
-              <span className="flex items-center gap-1 text-uplink" title="当前节点实时上行速率">
-                <ArrowUp className="h-3 w-3" />
-                {formatSpeed(metrics?.up_speed)}
-              </span>
-              <span className="h-3 w-px bg-hairline" />
-              <span className="flex items-center gap-1 text-accent" title="当前节点实时下行速率">
-                <ArrowDown className="h-3 w-3" />
-                {formatSpeed(metrics?.down_speed)}
-              </span>
-              <span className="h-3 w-px bg-hairline" />
-              <span
-                className="flex items-center gap-1 text-[11px] text-ink-muted"
-                title={sseConnected ? "SSE 实时推送已连接" : "SSE 正在重连"}
+            {viewMode === "master" ? (
+              /* Master Mode: clean cluster online nodes status chip only */
+              <button
+                type="button"
+                onClick={() => handleSelect("/")}
+                className="inline-flex items-center gap-2 rounded-md border border-hairline bg-recessed px-2.5 py-1 text-xs text-ink hover:border-hairline-strong"
+                title="查看集群节点状态"
               >
-                <StatusDot state={sseConnected ? "ok" : "warn"} className="h-1.5 w-1.5" />
-                SSE
-              </span>
-            </div>
+                <StatusDot state={onlineCount > 0 ? "ok" : "idle"} />
+                <span className="font-mono tabular-nums">
+                  {onlineCount}/{nodes.length} 在线
+                </span>
+              </button>
+            ) : (
+              /* Node Mode: live TX/RX speed pill + node sing-box core status LED */
+              <>
+                <div className="hidden items-center gap-3 rounded-md border border-hairline bg-recessed px-2.5 py-1 font-mono text-xs tabular-nums xl:flex">
+                  <span className="flex items-center gap-1 text-uplink" title="当前节点实时上行速率">
+                    <ArrowUp className="h-3 w-3" />
+                    {formatSpeed(metrics?.up_speed)}
+                  </span>
+                  <span className="h-3 w-px bg-hairline" />
+                  <span className="flex items-center gap-1 text-accent" title="当前节点实时下行速率">
+                    <ArrowDown className="h-3 w-3" />
+                    {formatSpeed(metrics?.down_speed)}
+                  </span>
+                  <span className="h-3 w-px bg-hairline" />
+                  <span
+                    className="flex items-center gap-1 text-[11px] text-ink-muted"
+                    title={sseConnected ? "SSE 实时推送已连接" : "SSE 正在重连"}
+                  >
+                    <StatusDot state={sseConnected ? "ok" : "warn"} className="h-1.5 w-1.5" />
+                    SSE
+                  </span>
+                </div>
 
-            {/* Core status indicator */}
-            <button
-              type="button"
-              onClick={() => handleSelect("/core")}
-              className="hidden items-center gap-2 rounded-md border border-hairline bg-recessed px-2.5 py-1 text-xs text-ink hover:border-hairline-strong sm:flex"
-            >
-              <StatusDot state={coreState} />
-              <span className="max-w-[140px] truncate font-mono">{coreLabel}</span>
-            </button>
+                <button
+                  type="button"
+                  onClick={() => handleSelect("/core")}
+                  className="hidden items-center gap-2 rounded-md border border-hairline bg-recessed px-2.5 py-1 text-xs text-ink hover:border-hairline-strong sm:flex"
+                >
+                  <StatusDot state={coreState} />
+                  <span className="max-w-[140px] truncate font-mono">{coreLabel}</span>
+                </button>
+              </>
+            )}
 
             <Button
               type="button"

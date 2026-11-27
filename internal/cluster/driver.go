@@ -335,6 +335,14 @@ func (d *LocalDriver) InspectCertFiles(ctx context.Context, certPath, keyPath st
 	return cert.InspectCertFiles(certPath, keyPath)
 }
 
+func (d *LocalDriver) CheckLocalPort(ctx context.Context, network string, port int) (LocalPortCheckResult, error) {
+	return CheckLocalPort(ctx, network, port)
+}
+
+func (d *LocalDriver) ProbeExternalPort(ctx context.Context, req ExternalPortProbeRequest) (ExternalPortProbeResult, error) {
+	return ProbeExternalPort(ctx, req)
+}
+
 // --- RemoteDriver (WebSocket RPC Multiplexer + Telemetry/Log Receiver) ---
 
 type rpcResult struct {
@@ -716,6 +724,32 @@ func (r *RemoteDriver) InspectCertFiles(ctx context.Context, certPath, keyPath s
 		return nil, err
 	}
 	return &info, nil
+}
+
+func (r *RemoteDriver) CheckLocalPort(ctx context.Context, network string, port int) (LocalPortCheckResult, error) {
+	var res LocalPortCheckResult
+	req := localPortCheckReq{
+		Network: network,
+		Port:    port,
+	}
+	if err := r.call(ctx, MethodNetCheckLocalPort, req, &res, 10*time.Second); err != nil {
+		return LocalPortCheckResult{}, err
+	}
+	return res, nil
+}
+
+func (r *RemoteDriver) ProbeExternalPort(ctx context.Context, req ExternalPortProbeRequest) (ExternalPortProbeResult, error) {
+	timeout := 12 * time.Second
+	if req.TimeoutMS > 0 {
+		if want := time.Duration(req.TimeoutMS)*time.Millisecond + 5*time.Second; want > timeout {
+			timeout = want
+		}
+	}
+	var res ExternalPortProbeResult
+	if err := r.call(ctx, MethodNetProbeExternalPort, req, &res, timeout); err != nil {
+		return ExternalPortProbeResult{}, err
+	}
+	return res, nil
 }
 
 // --- Internal Transport & Stream Loops ---

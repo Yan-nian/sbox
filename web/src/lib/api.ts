@@ -20,6 +20,8 @@ import type {
   InboundDefaultsResponse,
   InboundItem,
   InboundLinksResponse,
+  InboundPortCheckBatchResponse,
+  InboundPortCheckResult,
   InboundProtocol,
   InboundsResponse,
   LoginRequest,
@@ -458,6 +460,19 @@ export const api = {
 
   getInboundLinks: (id: number) =>
     request<InboundLinksResponse>(`/inbounds/${id}/links`),
+
+  checkInboundPort: (id: number) =>
+    request<InboundPortCheckResult>(`/inbounds/${id}/check-port`, {
+      method: "POST",
+    }),
+
+  checkAllInboundPorts: (nodeId?: number) =>
+    request<InboundPortCheckBatchResponse>(
+      withNodeId("/inbounds/check-ports", nodeId),
+      {
+        method: "POST",
+      },
+    ),
 
   // Traffic Stats (supports node_id filter; omit or 0 for cluster-wide)
   getTrafficStats: (params: {

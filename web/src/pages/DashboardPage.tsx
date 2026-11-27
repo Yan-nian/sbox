@@ -2,8 +2,6 @@ import { useState } from "react";
 import {
   Activity,
   AlertTriangle,
-  ArrowDown,
-  ArrowUp,
   ArrowUpRight,
   Check,
   Copy,
@@ -13,13 +11,12 @@ import {
   Play,
   RefreshCw,
   RotateCw,
-  Server,
   Square,
   Timer,
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { copyToClipboard } from "@/lib/clipboard";
-import { formatBytes, formatSpeed, formatUptime } from "@/lib/format";
+import { formatBytes, formatUptime } from "@/lib/format";
 import { useNode } from "@/contexts/NodeContext";
 import { useToast } from "@/components/ui/Toast";
 import { Badge, Button, Panel, StatusDot } from "@/components/ui/primitives";
@@ -35,7 +32,7 @@ interface DashboardPageProps {
 }
 
 export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
-  const { core, metrics, system, cluster, history, connected, refresh } = live;
+  const { core, metrics, system, history, connected, refresh } = live;
   const { activeNodeId, activeNode } = useNode();
   const toast = useToast();
   const [busyAction, setBusyAction] = useState<string | null>(null);
@@ -79,41 +76,8 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
 
   return (
     <div className="space-y-5">
-      {/* Node Context & Offline Notice */}
+      {/* Node Offline Notice */}
       <NodeScopeBanner onNavigate={onNavigate} />
-
-      {/* Compact Cluster Overview Bar */}
-      {cluster && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-hairline bg-surface px-4 py-2.5 text-xs">
-          <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5">
-            <span className="flex items-center gap-1.5 font-medium text-ink">
-              <Server className="h-3.5 w-3.5 text-accent" />
-              集群总览
-            </span>
-            <span className="font-mono tabular-nums text-ink-secondary">
-              在线节点:{" "}
-              <strong className="text-ok">{cluster.online_nodes}</strong> /{" "}
-              {cluster.total_nodes}
-            </span>
-            <span className="flex items-center gap-1 font-mono tabular-nums text-accent">
-              <ArrowDown className="h-3 w-3" />
-              {formatSpeed(cluster.total_down_speed)}
-            </span>
-            <span className="flex items-center gap-1 font-mono tabular-nums text-uplink">
-              <ArrowUp className="h-3 w-3" />
-              {formatSpeed(cluster.total_up_speed)}
-            </span>
-            <span className="font-mono tabular-nums text-ink-secondary">
-              总连接: <strong className="text-ink">{cluster.total_connections}</strong>
-            </span>
-          </div>
-
-          <Button variant="ghost" size="xs" onClick={() => onNavigate("/nodes")}>
-            节点管理
-            <ArrowUpRight className="h-3.5 w-3.5" />
-          </Button>
-        </div>
-      )}
 
       {/* Primary asymmetric hero: Oscilloscope (8 cols) + Core Control Deck (4 cols) */}
       <div className="grid gap-5 lg:grid-cols-12">
@@ -382,8 +346,8 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
         </div>
       </div>
 
-      {/* Historical Traffic Trend & Node/Member/Inbound Breakdown */}
-      <TrafficHistoryPanel />
+      {/* Node Historical Traffic Trend & Member/Inbound Breakdown */}
+      <TrafficHistoryPanel mode="node" />
 
       {/* Host identity & Public IP endpoints */}
       <div className="grid gap-5 lg:grid-cols-12">
@@ -438,7 +402,7 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
             <Button
               variant="ghost"
               size="xs"
-              onClick={() => onNavigate(activeNode?.is_local === false ? "/nodes" : "/settings")}
+              onClick={() => onNavigate(activeNode?.is_local === false ? "/" : "/settings")}
             >
               修改覆写
             </Button>

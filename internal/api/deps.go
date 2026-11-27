@@ -333,3 +333,9 @@ func (c *fallbackLocalController) IssueACME(ctx context.Context, certID int64, o
 func (c *fallbackLocalController) InspectCertFiles(_ context.Context, certPath, keyPath string) (*cert.CertInfo, error) {
 	return cert.InspectCertFiles(certPath, keyPath)
 }
+func (c *fallbackLocalController) CheckLocalPort(ctx context.Context, network string, port int) (cluster.LocalPortCheckResult, error) {
+	return cluster.CheckLocalPort(ctx, network, port)
+}
+func (c *fallbackLocalController) ProbeExternalPort(ctx context.Context, req cluster.ExternalPortProbeRequest) (cluster.ExternalPortProbeResult, error) {
+	return cluster.ProbeExternalPort(ctx, req)
+}

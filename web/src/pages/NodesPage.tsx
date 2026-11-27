@@ -33,6 +33,7 @@ import {
   StatusDot,
   Switch,
 } from "@/components/ui/primitives";
+import { TrafficHistoryPanel } from "@/components/TrafficHistoryPanel";
 import type { AppRoute } from "@/components/AppShell";
 import type {
   NodeUpgradeBatchItem,
@@ -51,7 +52,7 @@ interface NodesPageProps {
 }
 
 export function NodesPage({ onNavigate }: NodesPageProps) {
-  const { nodes, activeNodeId, setActiveNodeId, refreshNodes, loading } = useNode();
+  const { nodes, setActiveNodeId, refreshNodes, loading } = useNode();
   const toast = useToast();
 
   const [refreshing, setRefreshing] = useState(false);
@@ -401,15 +402,10 @@ export function NodesPage({ onNavigate }: NodesPageProps) {
                   </td>
                 </tr>
               ) : (
-                nodes.map((node) => {
-                  const isCurrent = node.id === activeNodeId;
-                  return (
+                nodes.map((node) => (
                     <tr
                       key={node.id}
-                      className={cn(
-                        "hover:bg-surface-hover/60",
-                        isCurrent && "bg-accent-muted/35",
-                      )}
+                      className="hover:bg-surface-hover/60"
                     >
                       <td className="px-4 py-3">
                         <div className="flex flex-wrap items-center gap-2">
@@ -420,7 +416,6 @@ export function NodesPage({ onNavigate }: NodesPageProps) {
                           <Badge tone={node.is_local ? "accent" : "neutral"}>
                             {node.is_local ? "本机主控" : "远端 Agent"}
                           </Badge>
-                          {isCurrent && <Badge tone="ok">当前视图</Badge>}
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-ink-muted">
                           {node.note && <span>{node.note}</span>}
@@ -478,15 +473,15 @@ export function NodesPage({ onNavigate }: NodesPageProps) {
                       <td className="px-4 py-3 text-right">
                         <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
                           <Button
-                            variant={isCurrent ? "ghost" : "secondary"}
+                            variant="primary"
                             size="xs"
                             onClick={() => {
                               setActiveNodeId(node.id);
-                              onNavigate("/");
+                              onNavigate("/node/dashboard");
                             }}
                           >
                             <ArrowUpRight className="h-3 w-3" />
-                            管理
+                            进入管理
                           </Button>
 
                           <Button
@@ -525,13 +520,15 @@ export function NodesPage({ onNavigate }: NodesPageProps) {
                         </div>
                       </td>
                     </tr>
-                  );
-                })
+                  ))
               )}
             </tbody>
           </table>
         </div>
       </Panel>
+
+      {/* Cluster-Wide Historical Traffic Trend & Rankings */}
+      <TrafficHistoryPanel mode="cluster" />
 
       {/* Add Remote Node Modal */}
       <Modal

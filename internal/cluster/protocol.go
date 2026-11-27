@@ -122,6 +122,8 @@ type NodeController interface {
 	GenerateSelfSigned(ctx context.Context, certID int64, domains []string, validDays int) (*CertFileBundle, error)
 	IssueACME(ctx context.Context, certID int64, opts cert.ACMEOptions) (*CertFileBundle, error)
 	InspectCertFiles(ctx context.Context, certPath, keyPath string) (*cert.CertInfo, error)
+	CheckLocalPort(ctx context.Context, network string, port int) (LocalPortCheckResult, error)
+	ProbeExternalPort(ctx context.Context, req ExternalPortProbeRequest) (ExternalPortProbeResult, error)
 }
 
 // HubCallbacks wires authentication, lifecycle notifications, and remote traffic accounting into Hub.
@@ -168,9 +170,11 @@ const (
 	rpcTelemetryConns      = "telemetry.connections"
 	rpcTelemetryCloseConn  = "telemetry.close_connection"
 	rpcToolsRealityProbe   = "tools.reality_probe"
-	rpcCertSelfSigned      = "cert.self_signed"
-	rpcCertACME            = "cert.acme"
-	rpcCertInspect         = "cert.inspect"
+	rpcCertSelfSigned          = "cert.self_signed"
+	rpcCertACME                = "cert.acme"
+	rpcCertInspect             = "cert.inspect"
+	MethodNetCheckLocalPort    = "net.check_local_port"
+	MethodNetProbeExternalPort = "net.probe_external_port"
 )
 
 // wireEnvelope is the top-level JSON frame sent over the agent WebSocket tunnel.

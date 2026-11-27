@@ -24,18 +24,24 @@ function formatBucketLabel(iso: string, range: TrafficRange): string {
   return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-export function TrafficHistoryPanel() {
+interface TrafficHistoryPanelProps {
+  mode?: "cluster" | "node";
+}
+
+export function TrafficHistoryPanel({ mode }: TrafficHistoryPanelProps = {}) {
   const { activeNodeId, activeNode, nodes } = useNode();
   const toast = useToast();
   const [range, setRange] = useState<TrafficRange>("24h");
-  const [scopeAllNodes, setScopeAllNodes] = useState(true);
+  const [scopeAllNodes, setScopeAllNodes] = useState(mode !== "node");
   const [stats, setStats] = useState<TrafficStatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [resetting, setResetting] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
-  const queryNodeId = scopeAllNodes ? undefined : activeNodeId;
+  const effectiveScopeAll =
+    mode === "cluster" ? true : mode === "node" ? false : scopeAllNodes;
+  const queryNodeId = effectiveScopeAll ? undefined : activeNodeId;
 
   const loadStats = useCallback(
     async (r: TrafficRange, nodeId?: number) => {
@@ -119,15 +125,23 @@ export function TrafficHistoryPanel() {
   const activeBucket =
     hoverIdx !== null && series[hoverIdx] ? series[hoverIdx] : null;
 
-  const showNodeBreakdown = byNode.length > 0;
+  const showNodeBreakdown = mode !== "node" && byNode.length > 0;
 
   return (
     <Panel
-      title="历史流量归档与排行"
-      description="由各节点 Clash API 连接追踪器聚合上报并落盘主控 SQLite，支持按节点、成员与入站多维统计"
+      title={
+        mode === "node" && activeNode
+          ? `节点历史流量 · ${activeNode.name}`
+          : "集群历史流量归档与排行"
+      }
+      description={
+        mode === "node"
+          ? "当前节点 Clash API 上报并归档的历史流量趋势与成员/入站排行"
+          : "由各节点 Clash API 连接追踪器聚合上报并落盘主控 SQLite，支持按节点、成员与入站多维统计"
+      }
       actions={
         <div className="flex flex-wrap items-center gap-2">
-          {nodes.length > 1 && (
+          {!mode && nodes.length > 1 && (
             <div className="inline-flex rounded-md border border-hairline bg-recessed p-0.5 text-xs">
               <button
                 type="button"
