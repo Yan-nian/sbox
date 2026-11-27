@@ -24,6 +24,7 @@ import (
 	"github.com/sbox-panel/sbox-panel/internal/coremgr"
 	"github.com/sbox-panel/sbox-panel/internal/model"
 	"github.com/sbox-panel/sbox-panel/internal/store"
+	"github.com/sbox-panel/sbox-panel/internal/syncer"
 	"github.com/sbox-panel/sbox-panel/internal/telemetry"
 )
 
@@ -224,25 +225,75 @@ func (s *Server) buildConfigForNode(
 		}
 	}
 
-	if extras, err := s.store.ListOutboundsExtra(ctx, nodeID); err == nil {
-		for _, ex := range extras {
-			if !ex.Enabled || strings.TrimSpace(ex.ConfigJSON) == "" || strings.TrimSpace(ex.ConfigJSON) == "{}" {
+	if upstreams, err := s.store.ListUpstreamSubs(ctx, nodeID); err == nil {
+		for _, u := range upstreams {
+			if !u.Enabled {
 				continue
 			}
-			if ex.Kind == "warp_endpoint" {
-				in.RawEndpoints = append(in.RawEndpoints, json.RawMessage(ex.ConfigJSON))
-			} else {
-				in.RawOutbounds = append(in.RawOutbounds, json.RawMessage(ex.ConfigJSON))
+			var parsed []syncer.ParsedOutbound
+			if err := json.Unmarshal([]byte(u.CachedNodesJSON), &parsed); err != nil || len(parsed) == 0 {
+				continue
 			}
+			rawNodes := make([]json.RawMessage, 0, len(parsed))
+			nodeTags := make([]string, 0, len(parsed))
+			for _, p := range parsed {
+				if len(p.Raw) == 0 || strings.TrimSpace(p.Tag) == "" {
+					continue
+				}
+				rawNodes = append(rawNodes, p.Raw)
+				nodeTags = append(nodeTags, p.Tag)
+			}
+			if len(nodeTags) == 0 {
+				continue
+			}
+			in.UpstreamGroups = append(in.UpstreamGroups, configgen.UpstreamGroupSpec{
+				GroupTag:      u.Tag,
+				URLTestTag:    u.Tag + "-auto",
+				EnableURLTest: u.EnableURLTest,
+				TestURL:       u.TestURL,
+				Nodes:         rawNodes,
+				NodeTags:      nodeTags,
+			})
 		}
 	}
+
+	if extras, err := s.store.ListOutboundsExtra(ctx, nodeID); err == nil {
+		for _, ex := range extras {
+			if !ex.Enabled || strings.TrimSpace(ex.Tag) == "" {
+				continue
+			}
+			in.ExtraOutbounds = append(in.ExtraOutbounds, configgen.ExtraOutboundSpec{
+				Tag:      ex.Tag,
+				Type:     ex.Type,
+				Settings: ex.Settings,
+			})
+		}
+	}
+
 	if rules, err := s.store.ListRouteRules(ctx, nodeID); err == nil {
 		for _, rr := range rules {
-			if rr.Enabled && strings.TrimSpace(rr.MatchJSON) != "" && strings.TrimSpace(rr.MatchJSON) != "{}" {
-				in.RawRouteRules = append(in.RawRouteRules, json.RawMessage(rr.MatchJSON))
+			if !rr.Enabled {
+				continue
 			}
+			in.RouteRules = append(in.RouteRules, configgen.RouteRuleSpec{
+				Priority:      rr.Priority,
+				Action:        rr.Action,
+				OutboundTag:   rr.OutboundTag,
+				RuleSets:      rr.RuleSets,
+				Domains:       rr.Domains,
+				DomainSuffix:  rr.DomainSuffix,
+				DomainKeyword: rr.DomainKeyword,
+				IPCIDR:        rr.IPCIDR,
+				Protocols:     rr.Protocols,
+				Ports:         rr.Ports,
+				AuthUsers:     rr.AuthUsers,
+				Inbounds:      rr.Inbounds,
+				IPIsPrivate:   rr.IPIsPrivate,
+			})
 		}
 	}
+
+	in.DefaultOutbound = node.DefaultOutbound
 
 	cfgBytes, err := configgen.Build(in)
 	if err != nil {
@@ -1015,6 +1066,9 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	if panelCertChanged && s.onPanelCertChange != nil {
 		s.onPanelCertChange()
+	}
+	if req.InstanceID != nil || req.PublicIPv4 != nil || req.PublicIPv6 != nil {
+		s.TriggerAutoSync()
 	}
 
 	updated, err := s.store.GetPanelSettings(ctx)

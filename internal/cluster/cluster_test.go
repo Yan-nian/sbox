@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -993,5 +995,245 @@ func TestStaleConnectionReplacementDoesNotMarkNodeOffline(t *testing.T) {
 	st, ok := hub.RuntimeState(5)
 	if !ok || st.Hostname != "new-session" {
 		t.Fatalf("expected RuntimeState hostname=new-session, got ok=%v st=%+v", ok, st)
+	}
+}
+
+func TestClusterProxyControlRPCs(t *testing.T) {
+	const (
+		validToken  = "tok-proxy-control-node6"
+		clashSecret = "secret-proxy-test"
+	)
+
+	var (
+		mu             sync.Mutex
+		selectedNow    = "node-jp"
+		lastDelayURL   string
+		lastDelayTO    string
+	)
+
+	clashMux := http.NewServeMux()
+	clashMux.HandleFunc("/proxies", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+clashSecret {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		mu.Lock()
+		cur := selectedNow
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"proxies": map[string]any{
+				"sub-airport": map[string]any{
+					"name": "sub-airport",
+					"type": "Selector",
+					"now":  cur,
+					"all":  []string{"sub-airport-auto", "node-jp", "node-sg"},
+				},
+				"sub-airport-auto": map[string]any{
+					"name": "sub-airport-auto",
+					"type": "URLTest",
+					"now":  "node-sg",
+					"all":  []string{"node-jp", "node-sg"},
+				},
+				"node-jp": map[string]any{
+					"name":    "node-jp",
+					"type":    "VLESS",
+					"history": []map[string]any{{"delay": 42}},
+				},
+				"node-sg": map[string]any{
+					"name":    "node-sg",
+					"type":    "VLESS",
+					"history": []map[string]any{{"delay": 88}},
+				},
+			},
+		})
+	})
+	clashMux.HandleFunc("/proxies/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+clashSecret {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		rest := strings.TrimPrefix(r.URL.Path, "/proxies/")
+		if r.Method == http.MethodGet && strings.HasSuffix(rest, "/delay") {
+			rawName := strings.TrimSuffix(rest, "/delay")
+			name, _ := url.PathUnescape(rawName)
+			mu.Lock()
+			lastDelayURL = r.URL.Query().Get("url")
+			lastDelayTO = r.URL.Query().Get("timeout")
+			mu.Unlock()
+
+			if name == "node-dead" {
+				w.WriteHeader(http.StatusGatewayTimeout)
+				_, _ = w.Write([]byte(`{"message":"timeout"}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"delay":73}`))
+			return
+		}
+		if r.Method == http.MethodPut {
+			group, _ := url.PathUnescape(rest)
+			var body struct {
+				Name string `json:"name"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if group != "sub-airport" || (body.Name != "node-jp" && body.Name != "node-sg" && body.Name != "sub-airport-auto") {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"message":"invalid group or proxy"}`))
+				return
+			}
+			mu.Lock()
+			selectedNow = body.Name
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	})
+	clashSrv := httptest.NewServer(clashMux)
+	defer clashSrv.Close()
+	clashAddr := strings.TrimPrefix(clashSrv.URL, "http://")
+
+	// Also verify LocalDriver delegation directly against the same mock Clash API.
+	localTel := telemetry.NewHub(nil)
+	localCtx, localCancel := context.WithCancel(context.Background())
+	localTel.Start(localCtx, clashAddr, clashSecret)
+	defer func() {
+		localCancel()
+		localTel.Stop()
+	}()
+	local := NewLocalDriver(1, t.TempDir(), "0.4.0-master", nil, localTel)
+
+	connectedCh := make(chan int64, 4)
+	hub := NewHub(local, HubCallbacks{
+		AuthenticateToken: func(token string) (int64, bool) {
+			if token == validToken {
+				return 6, true
+			}
+			return 0, false
+		},
+		OnAgentConnected: func(nodeID int64, _ NodeHello) {
+			connectedCh <- nodeID
+		},
+	})
+	defer hub.Close()
+
+	masterMux := http.NewServeMux()
+	masterMux.HandleFunc("/api/v1/agent/ws", hub.HandleAgentWS)
+	masterSrv := httptest.NewServer(masterMux)
+	defer masterSrv.Close()
+
+	agentCtx, agentCancel := context.WithCancel(context.Background())
+	agentDone := make(chan error, 1)
+	go func() {
+		agentDone <- runAgent(agentCtx, AgentConfig{
+			MasterURL:    masterSrv.URL,
+			Token:        validToken,
+			DataDir:      t.TempDir(),
+			AgentVersion: "0.4.0-agent",
+		}, agentOptions{
+			clashAPIAddrOverride: clashAddr,
+			clashSecretOverride:  clashSecret,
+			reconnectSchedule:    []time.Duration{100 * time.Millisecond},
+			telemetryInterval:    150 * time.Millisecond,
+		})
+	}()
+	defer func() {
+		agentCancel()
+		<-agentDone
+	}()
+
+	select {
+	case id := <-connectedCh:
+		if id != 6 {
+			t.Fatalf("connected id = %d, want 6", id)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for node 6 to connect")
+	}
+
+	remoteCtrl, ok := hub.Get(6)
+	if !ok {
+		t.Fatalf("hub.Get(6) returned offline")
+	}
+
+	rpcCtx, rpcCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer rpcCancel()
+
+	// 1. Verify LocalDriver ListProxyGroups & TestProxyDelay.
+	localGroups, err := local.ListProxyGroups(rpcCtx)
+	if err != nil {
+		t.Fatalf("local.ListProxyGroups: %v", err)
+	}
+	if len(localGroups) != 2 {
+		t.Fatalf("local.ListProxyGroups count = %d, want 2: %+v", len(localGroups), localGroups)
+	}
+
+	// 2. Verify RemoteDriver ListProxyGroups over WebSocket RPC.
+	groups, err := remoteCtrl.ListProxyGroups(rpcCtx)
+	if err != nil {
+		t.Fatalf("remote.ListProxyGroups: %v", err)
+	}
+	var airport *telemetry.ProxyGroupInfo
+	for i := range groups {
+		if groups[i].Name == "sub-airport" {
+			airport = &groups[i]
+			break
+		}
+	}
+	if airport == nil {
+		t.Fatalf("sub-airport group not found in %+v", groups)
+	}
+	if airport.Type != "Selector" || airport.Now != "node-jp" || len(airport.All) != 3 {
+		t.Fatalf("unexpected sub-airport group: %+v", *airport)
+	}
+	if airport.Delays["node-jp"] != 42 || airport.Delays["node-sg"] != 88 {
+		t.Fatalf("unexpected group delays: %+v", airport.Delays)
+	}
+
+	// 3. Verify RemoteDriver TestProxyDelay success and error propagation.
+	delayMS, err := remoteCtrl.TestProxyDelay(rpcCtx, "node-jp", "https://cp.cloudflare.com", 3200)
+	if err != nil {
+		t.Fatalf("remote.TestProxyDelay: %v", err)
+	}
+	if delayMS != 73 {
+		t.Fatalf("remote.TestProxyDelay = %d, want 73", delayMS)
+	}
+	mu.Lock()
+	gotURL, gotTO := lastDelayURL, lastDelayTO
+	mu.Unlock()
+	if gotURL != "https://cp.cloudflare.com" || gotTO != "3200" {
+		t.Fatalf("delay query params = (url=%q, timeout=%q), want (https://cp.cloudflare.com, 3200)", gotURL, gotTO)
+	}
+
+	if _, err := remoteCtrl.TestProxyDelay(rpcCtx, "node-dead", "", 2000); err == nil {
+		t.Fatalf("expected error for dead proxy delay test, got nil")
+	}
+
+	// 4. Verify RemoteDriver SelectProxy updates state and propagates errors cleanly.
+	if err := remoteCtrl.SelectProxy(rpcCtx, "sub-airport", "node-sg"); err != nil {
+		t.Fatalf("remote.SelectProxy: %v", err)
+	}
+	groupsAfter, err := remoteCtrl.ListProxyGroups(rpcCtx)
+	if err != nil {
+		t.Fatalf("remote.ListProxyGroups after select: %v", err)
+	}
+	var switchedNow string
+	for _, g := range groupsAfter {
+		if g.Name == "sub-airport" {
+			switchedNow = g.Now
+			break
+		}
+	}
+	if switchedNow != "node-sg" {
+		t.Fatalf("sub-airport now after SelectProxy = %q, want node-sg", switchedNow)
+	}
+
+	if err := remoteCtrl.SelectProxy(rpcCtx, "missing-group", "node-sg"); err == nil {
+		t.Fatalf("expected error selecting on missing group, got nil")
 	}
 }

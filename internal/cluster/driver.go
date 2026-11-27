@@ -258,6 +258,36 @@ func (d *LocalDriver) CloseConnection(ctx context.Context, id string) error {
 	return d.tel.CloseConnection(ctx, id)
 }
 
+func (d *LocalDriver) ListProxyGroups(ctx context.Context) ([]telemetry.ProxyGroupInfo, error) {
+	if d.tel == nil {
+		return []telemetry.ProxyGroupInfo{}, errors.New("telemetry hub unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return d.tel.ListProxyGroups(ctx)
+}
+
+func (d *LocalDriver) TestProxyDelay(ctx context.Context, proxyName, testURL string, timeoutMS int) (int, error) {
+	if d.tel == nil {
+		return 0, errors.New("telemetry hub unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return d.tel.TestProxyDelay(ctx, proxyName, testURL, timeoutMS)
+}
+
+func (d *LocalDriver) SelectProxy(ctx context.Context, groupName, proxyName string) error {
+	if d.tel == nil {
+		return errors.New("telemetry hub unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return d.tel.SelectProxy(ctx, groupName, proxyName)
+}
+
 func (d *LocalDriver) ProbeRealityTarget(ctx context.Context, target string) (cert.RealityProbeResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -603,6 +633,44 @@ func (r *RemoteDriver) Connections(ctx context.Context) ([]telemetry.ConnectionI
 
 func (r *RemoteDriver) CloseConnection(ctx context.Context, id string) error {
 	return r.call(ctx, rpcTelemetryCloseConn, closeConnectionReq{ID: id}, nil, defaultRPCTimeout)
+}
+
+func (r *RemoteDriver) ListProxyGroups(ctx context.Context) ([]telemetry.ProxyGroupInfo, error) {
+	var resp coreProxiesResp
+	if err := r.call(ctx, MethodCoreProxies, nil, &resp, defaultRPCTimeout); err != nil {
+		return nil, err
+	}
+	if resp.Groups == nil {
+		return []telemetry.ProxyGroupInfo{}, nil
+	}
+	return resp.Groups, nil
+}
+
+func (r *RemoteDriver) TestProxyDelay(ctx context.Context, proxyName, testURL string, timeoutMS int) (int, error) {
+	timeout := defaultRPCTimeout
+	if timeoutMS > 0 {
+		if want := time.Duration(timeoutMS)*time.Millisecond + 5*time.Second; want > timeout {
+			timeout = want
+		}
+	}
+	var resp coreProxyDelayResp
+	req := coreProxyDelayReq{
+		Proxy:     proxyName,
+		TestURL:   testURL,
+		TimeoutMS: timeoutMS,
+	}
+	if err := r.call(ctx, MethodCoreProxyDelay, req, &resp, timeout); err != nil {
+		return 0, err
+	}
+	return resp.DelayMS, nil
+}
+
+func (r *RemoteDriver) SelectProxy(ctx context.Context, groupName, proxyName string) error {
+	req := coreProxySelectReq{
+		Group: groupName,
+		Proxy: proxyName,
+	}
+	return r.call(ctx, MethodCoreProxySelect, req, nil, defaultRPCTimeout)
 }
 
 func (r *RemoteDriver) ProbeRealityTarget(ctx context.Context, target string) (cert.RealityProbeResult, error) {

@@ -721,6 +721,41 @@ func (a *agentRunner) handleRPC(agentCtx, sessionCtx context.Context, sess *agen
 			cancel()
 		}
 
+	case MethodCoreProxies:
+		opCtx, cancel := context.WithTimeout(sessionCtx, defaultRPCTimeout)
+		var groups []telemetry.ProxyGroupInfo
+		groups, err = a.telHub.ListProxyGroups(opCtx)
+		cancel()
+		if err == nil {
+			resp = coreProxiesResp{Groups: groups}
+		}
+
+	case MethodCoreProxyDelay:
+		var p coreProxyDelayReq
+		if err = json.Unmarshal(req.Payload, &p); err == nil {
+			timeout := defaultRPCTimeout
+			if p.TimeoutMS > 0 {
+				if want := time.Duration(p.TimeoutMS)*time.Millisecond + 5*time.Second; want > timeout {
+					timeout = want
+				}
+			}
+			opCtx, cancel := context.WithTimeout(sessionCtx, timeout)
+			var delayMS int
+			delayMS, err = a.telHub.TestProxyDelay(opCtx, p.Proxy, p.TestURL, p.TimeoutMS)
+			cancel()
+			if err == nil {
+				resp = coreProxyDelayResp{DelayMS: delayMS}
+			}
+		}
+
+	case MethodCoreProxySelect:
+		var p coreProxySelectReq
+		if err = json.Unmarshal(req.Payload, &p); err == nil {
+			opCtx, cancel := context.WithTimeout(sessionCtx, defaultRPCTimeout)
+			err = a.telHub.SelectProxy(opCtx, p.Group, p.Proxy)
+			cancel()
+		}
+
 	case rpcToolsRealityProbe:
 		var p realityProbeReq
 		if err = json.Unmarshal(req.Payload, &p); err == nil {

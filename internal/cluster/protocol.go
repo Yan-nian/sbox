@@ -115,6 +115,9 @@ type NodeController interface {
 	SubscribeLogs() (<-chan telemetry.LogEntry, func())
 	Connections(ctx context.Context) ([]telemetry.ConnectionItem, error)
 	CloseConnection(ctx context.Context, id string) error
+	ListProxyGroups(ctx context.Context) ([]telemetry.ProxyGroupInfo, error)
+	TestProxyDelay(ctx context.Context, proxyName, testURL string, timeoutMS int) (int, error)
+	SelectProxy(ctx context.Context, groupName, proxyName string) error
 	ProbeRealityTarget(ctx context.Context, target string) (cert.RealityProbeResult, error)
 	GenerateSelfSigned(ctx context.Context, certID int64, domains []string, validDays int) (*CertFileBundle, error)
 	IssueACME(ctx context.Context, certID int64, opts cert.ACMEOptions) (*CertFileBundle, error)
@@ -159,6 +162,9 @@ const (
 	rpcCoreUpgrade         = "core.upgrade"
 	rpcCoreUploadBinary    = "core.upload_binary"
 	rpcCoreRollback        = "core.rollback"
+	MethodCoreProxies      = "core.proxies"
+	MethodCoreProxyDelay   = "core.proxy_delay"
+	MethodCoreProxySelect  = "core.proxy_select"
 	rpcTelemetryConns      = "telemetry.connections"
 	rpcTelemetryCloseConn  = "telemetry.close_connection"
 	rpcToolsRealityProbe   = "tools.reality_probe"
@@ -219,6 +225,25 @@ type connectionsResp struct {
 
 type closeConnectionReq struct {
 	ID string `json:"id"`
+}
+
+type coreProxiesResp struct {
+	Groups []telemetry.ProxyGroupInfo `json:"groups"`
+}
+
+type coreProxyDelayReq struct {
+	Proxy     string `json:"proxy"`
+	TestURL   string `json:"test_url,omitempty"`
+	TimeoutMS int    `json:"timeout_ms,omitempty"`
+}
+
+type coreProxyDelayResp struct {
+	DelayMS int `json:"delay_ms"`
+}
+
+type coreProxySelectReq struct {
+	Group string `json:"group"`
+	Proxy string `json:"proxy"`
 }
 
 type realityProbeReq struct {

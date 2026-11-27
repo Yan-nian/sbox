@@ -372,6 +372,7 @@ func (s *Server) handleCreateInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = s.RecompileAndApplyNode(ctx, ib.NodeID)
+	s.TriggerAutoSync()
 	if s.telemetry != nil {
 		s.telemetry.PublishLog("info", "panel", fmt.Sprintf("created inbound %q (%s:%d) on node %d", ib.Tag, ib.Protocol, ib.ListenPort, ib.NodeID))
 	}
@@ -470,6 +471,7 @@ func (s *Server) handleUpdateInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = s.RecompileAndApplyNode(ctx, ib.NodeID)
+	s.TriggerAutoSync()
 	writeJSON(w, http.StatusOK, ib)
 }
 
@@ -492,6 +494,7 @@ func (s *Server) handleToggleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = s.RecompileAndApplyNode(ctx, ib.NodeID)
+	s.TriggerAutoSync()
 	writeJSON(w, http.StatusOK, ib)
 }
 
@@ -519,5 +522,6 @@ func (s *Server) handleDeleteInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = s.RecompileAndApplyNode(ctx, ib.NodeID)
+	s.TriggerAutoSync()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

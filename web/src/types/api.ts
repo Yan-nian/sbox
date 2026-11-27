@@ -556,3 +556,360 @@ export interface ResetTrafficRequest {
   scope: "all" | "member" | "inbound";
   id?: number;
 }
+
+// --- Milestone 4: Upstream Outbound Subs, WARP, Live Proxies & Visual Routing ---
+
+export interface UpstreamSubItem {
+  id: number;
+  node_id: number; // 0 = global shared across all nodes, >0 = specific node
+  name: string;
+  tag: string;
+  url: string;
+  enabled: boolean;
+  interval_minutes: number;
+  include_regex: string;
+  exclude_regex: string;
+  enable_urltest: boolean;
+  test_url: string;
+  proxy_url: string;
+  cached_format: string; // "singbox" | "clash" | "uri" | ""
+  node_count: number;
+  last_fetched_at?: string;
+  last_error?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface UpstreamsResponse {
+  upstreams: UpstreamSubItem[];
+}
+
+export interface SaveUpstreamRequest {
+  node_id?: number;
+  name: string;
+  tag?: string;
+  url: string;
+  enabled?: boolean;
+  interval_minutes?: number;
+  include_regex?: string;
+  exclude_regex?: string;
+  enable_urltest?: boolean;
+  test_url?: string;
+  proxy_url?: string;
+  fetch_now?: boolean;
+}
+
+export type ExtraOutboundType = "warp" | "wireguard" | "socks" | "http" | "raw";
+
+export interface ExtraOutboundSettings {
+  // WARP / WireGuard
+  account_id?: string;
+  private_key?: string;
+  public_key?: string;
+  peer_public_key?: string;
+  endpoint_host?: string;
+  endpoint_port?: number;
+  local_ipv4?: string;
+  local_ipv6?: string;
+  reserved?: number[];
+  mtu?: number;
+  ipv6_only?: boolean;
+
+  // SOCKS / HTTP
+  server?: string;
+  server_port?: number;
+  username?: string;
+  password?: string;
+  tls?: boolean;
+  server_name?: string;
+  insecure?: boolean;
+
+  // Raw sing-box JSON (arbitrary fields)
+  [key: string]: unknown;
+}
+
+export interface ExtraOutboundItem {
+  id: number;
+  node_id: number;
+  name: string;
+  tag: string;
+  type: ExtraOutboundType;
+  enabled: boolean;
+  settings: ExtraOutboundSettings;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface OutboundsResponse {
+  outbounds: ExtraOutboundItem[];
+}
+
+export interface SaveExtraOutboundRequest {
+  node_id?: number;
+  name: string;
+  tag?: string;
+  type: ExtraOutboundType;
+  enabled?: boolean;
+  settings: ExtraOutboundSettings;
+}
+
+export interface RegisterWARPRequest {
+  node_id?: number;
+  name?: string;
+  tag?: string;
+  ipv6_only?: boolean;
+  mtu?: number;
+  proxy_url?: string;
+}
+
+export interface ProxyGroupInfo {
+  name: string;
+  type: string;
+  now: string;
+  all: string[];
+  delays: Record<string, number>;
+}
+
+export interface ProxyGroupsResponse {
+  groups: ProxyGroupInfo[];
+}
+
+export interface ProxyDelayResponse {
+  proxy: string;
+  delay_ms: number;
+}
+
+export type RouteRuleAction = "route" | "reject" | "hijack-dns" | "sniff";
+
+export interface RouteRuleItem {
+  id: number;
+  node_id: number;
+  name: string;
+  preset_key?: string;
+  priority: number;
+  enabled: boolean;
+  action: RouteRuleAction;
+  outbound_tag: string;
+  rule_sets: string[];
+  domains: string[];
+  domain_suffix: string[];
+  domain_keyword: string[];
+  ip_cidr: string[];
+  protocol: string[];
+  port: number[];
+  auth_user: string[];
+  inbound: string[];
+  ip_is_private: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface SaveRouteRuleRequest {
+  node_id?: number;
+  name: string;
+  preset_key?: string;
+  priority?: number;
+  enabled?: boolean;
+  action: RouteRuleAction;
+  outbound_tag?: string;
+  rule_sets?: string[];
+  domains?: string[];
+  domain_suffix?: string[];
+  domain_keyword?: string[];
+  ip_cidr?: string[];
+  protocol?: string[];
+  port?: number[];
+  auth_user?: string[];
+  inbound?: string[];
+  ip_is_private?: boolean;
+}
+
+export interface RoutingPresetItem {
+  key: string;
+  name: string;
+  description: string;
+  category: "unlock" | "block";
+  needs_outbound: boolean;
+  default_action: "route" | "reject";
+  rule_sets?: {
+    tag: string;
+    url: string;
+    download_detour?: string;
+    update_interval?: string;
+  }[];
+  rule_template?: Record<string, unknown>;
+}
+
+export interface RoutingPresetsResponse {
+  presets: RoutingPresetItem[];
+}
+
+export interface RoutingRulesResponse {
+  rules: RouteRuleItem[];
+  default_outbound: string;
+  available_outbounds: string[];
+}
+
+// --- Milestone 5: Cluster Subscriptions, Remote Sync & Encrypted Backup ---
+
+export type SubFormat = "base64" | "uri" | "singbox" | "clash";
+
+export interface SubscriptionNodeItem {
+  name: string;
+  protocol: string;
+  node_name: string;
+  uri: string;
+}
+
+export interface SubscriptionPreviewResponse {
+  format: SubFormat;
+  sub_url: string;
+  content: string;
+  nodes: SubscriptionNodeItem[];
+}
+
+export type SyncTargetType = "github_gist" | "github_repo" | "sub_store";
+export type SyncMergeMode = "replace" | "merge_by_instance";
+
+export interface SyncTargetConfig {
+  token?: string;
+  gist_id?: string;
+  repo?: string;
+  branch?: string;
+  file_path?: string;
+  sub_store_url?: string;
+  sub_store_name?: string;
+  proxy_url?: string;
+}
+
+export interface SyncTargetItem {
+  id: number;
+  name: string;
+  enabled: boolean;
+  type: SyncTargetType;
+  member_id: number;
+  format: SubFormat;
+  merge_mode: SyncMergeMode;
+  auto_push: boolean;
+  has_token: boolean;
+  config: SyncTargetConfig;
+  last_pushed_at?: string;
+  last_status?: string;
+  last_error?: string;
+  last_remote_url?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface SyncTargetsResponse {
+  targets: SyncTargetItem[];
+}
+
+export interface SaveSyncTargetRequest {
+  name: string;
+  enabled?: boolean;
+  type: SyncTargetType;
+  member_id: number;
+  format: SubFormat;
+  merge_mode?: SyncMergeMode;
+  auto_push?: boolean;
+  config: SyncTargetConfig;
+}
+
+export interface SyncPushResult {
+  success: boolean;
+  http_status: number;
+  remote_url?: string;
+  node_count: number;
+  message: string;
+}
+
+export interface SyncPushResponse {
+  target: SyncTargetItem;
+  result: SyncPushResult;
+}
+
+export interface SyncPushAllItem {
+  target_id: number;
+  target_name: string;
+  result: SyncPushResult;
+}
+
+export interface SyncPushAllResponse {
+  results: SyncPushAllItem[];
+}
+
+export interface SyncHistoryItem {
+  id: number;
+  target_id: number;
+  target_name: string;
+  success: boolean;
+  http_status: number;
+  node_count: number;
+  message: string;
+  created_at: string;
+}
+
+export interface SyncHistoryResponse {
+  history: SyncHistoryItem[];
+}
+
+export interface BackupInspectResult {
+  encrypted: boolean;
+  file_count: number;
+  has_db: boolean;
+  cert_files: number;
+}
+
+export interface BackupRestoreResponse {
+  restored: BackupInspectResult;
+  base_path: string;
+}
+
+export type RemoteBackupType = "github_repo" | "github_gist";
+
+export interface RemoteBackupConfig {
+  enabled: boolean;
+  type: RemoteBackupType;
+  repo: string;
+  branch: string;
+  path_prefix: string;
+  gist_id: string;
+  keep_count: number;
+  interval_hours: number;
+  has_token: boolean;
+  has_passphrase: boolean;
+  proxy_url: string;
+  last_backup_at?: string;
+  last_error?: string;
+}
+
+export interface SaveRemoteBackupConfigRequest {
+  enabled: boolean;
+  type: RemoteBackupType;
+  repo?: string;
+  branch?: string;
+  path_prefix?: string;
+  gist_id?: string;
+  token?: string;
+  passphrase?: string;
+  keep_count?: number;
+  interval_hours?: number;
+  proxy_url?: string;
+}
+
+export interface RemoteBackupEntry {
+  name: string;
+  path: string;
+  sha?: string;
+  size: number;
+  created_at?: string;
+}
+
+export interface RemoteBackupListResponse {
+  entries: RemoteBackupEntry[];
+}
+
+export interface RemoteBackupPushResponse {
+  entry: RemoteBackupEntry;
+}

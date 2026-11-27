@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -32,12 +33,12 @@ type TrafficDeltaInput struct {
 
 // Store wraps the SQLite database connection and provides domain CRUD operations.
 type Store struct {
+	mu   sync.RWMutex
 	db   *sql.DB
 	path string
 }
 
-// Open opens or creates the SQLite database at dbPath, enables WAL mode, and runs all migrations.
-func Open(dbPath string) (*Store, error) {
+func openSQLiteDB(dbPath string) (*sql.DB, error) {
 	if dbPath != ":memory:" && !strings.HasPrefix(dbPath, "file:") {
 		if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
 			return nil, fmt.Errorf("create db parent dir: %w", err)
@@ -81,6 +82,18 @@ func Open(dbPath string) (*Store, error) {
 			return nil, fmt.Errorf("exec %s: %w", p, err)
 		}
 	}
+	return db, nil
+}
+
+// Open opens or creates the SQLite database at dbPath, enables WAL mode, and runs all migrations.
+func Open(dbPath string) (*Store, error) {
+	db, err := openSQLiteDB(dbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
 	s := &Store{db: db, path: dbPath}
 	if err := s.Migrate(ctx); err != nil {
@@ -92,14 +105,88 @@ func Open(dbPath string) (*Store, error) {
 
 // Close closes the underlying database handle.
 func (s *Store) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
-	return s.db.Close()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return nil
+	}
+	err := s.db.Close()
+	s.db = nil
+	return err
+}
+
+// Reopen closes the current SQLite handle (if open), reopens it, and runs migrations.
+func (s *Store) Reopen(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db != nil {
+		_, _ = s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE);")
+		_ = s.db.Close()
+		s.db = nil
+	}
+	db, err := openSQLiteDB(s.path)
+	if err != nil {
+		return err
+	}
+	s.db = db
+	return s.Migrate(ctx)
+}
+
+// CheckpointWAL flushes pending WAL pages to the main database file (best-effort before online snapshot).
+func (s *Store) CheckpointWAL(ctx context.Context) error {
+	s.mu.RLock()
+	db := s.db
+	s.mu.RUnlock()
+	if db == nil {
+		return errors.New("database is closed")
+	}
+	_, err := db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE);")
+	return err
+}
+
+// WithClosedDB checkpoints WAL, closes the SQLite handle exclusively, invokes fn(dbPath) (e.g. backup.RestoreArchive),
+// and ALWAYS reopens SQLite and runs migrations before returning so the panel remains operational even on restore error.
+func (s *Store) WithClosedDB(ctx context.Context, fn func(dbPath string) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.path == "" || s.path == ":memory:" || strings.HasPrefix(s.path, "file:") {
+		return errors.New("cannot replace an in-memory database")
+	}
+
+	if s.db != nil {
+		_, _ = s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE);")
+		_ = s.db.Close()
+		s.db = nil
+	}
+
+	fnErr := fn(s.path)
+
+	db, openErr := openSQLiteDB(s.path)
+	if openErr != nil {
+		if fnErr != nil {
+			return fmt.Errorf("%w (reopen failed: %v)", fnErr, openErr)
+		}
+		return fmt.Errorf("reopen database after restore: %w", openErr)
+	}
+	s.db = db
+
+	if migErr := s.Migrate(ctx); migErr != nil {
+		if fnErr != nil {
+			return fmt.Errorf("%w (migrate failed: %v)", fnErr, migErr)
+		}
+		return fmt.Errorf("migrate database after restore: %w", migErr)
+	}
+	return fnErr
 }
 
 // DB exposes the underlying *sql.DB handle.
 func (s *Store) DB() *sql.DB {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.db
 }
 
@@ -108,7 +195,7 @@ func (s *Store) Path() string {
 	return s.path
 }
 
-// Migrate applies all pending SQLite schema migrations idempotently, including Milestone 3 multi-node upgrades.
+// Migrate applies all pending SQLite schema migrations idempotently, including Milestone 3, 4, and 5 upgrades.
 func (s *Store) Migrate(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -148,7 +235,13 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 	}
 
-	return s.ensureMilestone3Schema(ctx)
+	if err := s.ensureMilestone3Schema(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureMilestone4Schema(ctx); err != nil {
+		return err
+	}
+	return s.ensureMilestone5Schema(ctx)
 }
 
 // TableNames returns all user table names in SQLite (excluding sqlite_* internal tables).
@@ -988,223 +1081,6 @@ func (s *Store) DeleteInbound(ctx context.Context, id int64) error {
 		return ErrNotFound
 	}
 	return nil
-}
-
-// --- Upstream Subscriptions, Extra Outbounds, Route Rules, Sync Targets ---
-
-func (s *Store) CreateUpstreamSub(ctx context.Context, u *model.UpstreamSub) error {
-	if u.CachedNodesJSON == "" {
-		u.CachedNodesJSON = "[]"
-	}
-	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO upstream_subs (node_id, name, url, enabled, update_cron, include_regex, exclude_regex, selector_tag, urltest_tag, cached_nodes_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, u.NodeID, u.Name, u.URL, boolToInt(u.Enabled), u.UpdateCron, u.IncludeRegex, u.ExcludeRegex, u.SelectorTag, u.URLTestTag, u.CachedNodesJSON)
-	if err != nil {
-		return err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return err
-	}
-	u.ID = id
-	return nil
-}
-
-func (s *Store) ListUpstreamSubs(ctx context.Context) ([]model.UpstreamSub, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, node_id, name, url, enabled, update_cron, include_regex, exclude_regex, selector_tag, urltest_tag, cached_nodes_json, last_fetch_status, last_fetch_error, last_fetched_at, created_at, updated_at
-		FROM upstream_subs ORDER BY id ASC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	list := make([]model.UpstreamSub, 0)
-	for rows.Next() {
-		var u model.UpstreamSub
-		var enabled int
-		var fetched sql.NullTime
-		if err := rows.Scan(&u.ID, &u.NodeID, &u.Name, &u.URL, &enabled, &u.UpdateCron, &u.IncludeRegex, &u.ExcludeRegex, &u.SelectorTag, &u.URLTestTag, &u.CachedNodesJSON, &u.LastFetchStatus, &u.LastFetchError, &fetched, &u.CreatedAt, &u.UpdatedAt); err != nil {
-			return nil, err
-		}
-		u.Enabled = enabled != 0
-		if fetched.Valid {
-			t := fetched.Time
-			u.LastFetchedAt = &t
-		}
-		list = append(list, u)
-	}
-	return list, rows.Err()
-}
-
-func (s *Store) CreateOutboundExtra(ctx context.Context, o *model.OutboundExtra) error {
-	if o.NodeID <= 0 {
-		o.NodeID = 1
-	}
-	if o.ConfigJSON == "" {
-		o.ConfigJSON = "{}"
-	}
-	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO outbounds_extra (node_id, name, tag, kind, enabled, config_json)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, o.NodeID, o.Name, o.Tag, o.Kind, boolToInt(o.Enabled), o.ConfigJSON)
-	if err != nil {
-		return err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return err
-	}
-	o.ID = id
-	return nil
-}
-
-func (s *Store) ListOutboundsExtra(ctx context.Context, nodeID int64) ([]model.OutboundExtra, error) {
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if nodeID > 0 {
-		rows, err = s.db.QueryContext(ctx, `
-			SELECT id, node_id, name, tag, kind, enabled, config_json, created_at, updated_at
-			FROM outbounds_extra WHERE node_id = ? ORDER BY id ASC
-		`, nodeID)
-	} else {
-		rows, err = s.db.QueryContext(ctx, `
-			SELECT id, node_id, name, tag, kind, enabled, config_json, created_at, updated_at
-			FROM outbounds_extra ORDER BY node_id ASC, id ASC
-		`)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	list := make([]model.OutboundExtra, 0)
-	for rows.Next() {
-		var o model.OutboundExtra
-		var enabled int
-		if err := rows.Scan(&o.ID, &o.NodeID, &o.Name, &o.Tag, &o.Kind, &enabled, &o.ConfigJSON, &o.CreatedAt, &o.UpdatedAt); err != nil {
-			return nil, err
-		}
-		o.Enabled = enabled != 0
-		list = append(list, o)
-	}
-	return list, rows.Err()
-}
-
-func (s *Store) CreateRouteRule(ctx context.Context, r *model.RouteRule) error {
-	if r.NodeID <= 0 {
-		r.NodeID = 1
-	}
-	if r.MatchJSON == "" {
-		r.MatchJSON = "{}"
-	}
-	if r.PresetType == "" {
-		r.PresetType = "custom"
-	}
-	if r.Action == "" {
-		r.Action = "route"
-	}
-	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO route_rules (node_id, name, priority, preset_type, match_json, action, outbound_tag, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, r.NodeID, r.Name, r.Priority, r.PresetType, r.MatchJSON, r.Action, r.OutboundTag, boolToInt(r.Enabled))
-	if err != nil {
-		return err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return err
-	}
-	r.ID = id
-	return nil
-}
-
-func (s *Store) ListRouteRules(ctx context.Context, nodeID int64) ([]model.RouteRule, error) {
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if nodeID > 0 {
-		rows, err = s.db.QueryContext(ctx, `
-			SELECT id, node_id, name, priority, preset_type, match_json, action, outbound_tag, enabled, created_at, updated_at
-			FROM route_rules WHERE node_id = ? ORDER BY priority ASC, id ASC
-		`, nodeID)
-	} else {
-		rows, err = s.db.QueryContext(ctx, `
-			SELECT id, node_id, name, priority, preset_type, match_json, action, outbound_tag, enabled, created_at, updated_at
-			FROM route_rules ORDER BY node_id ASC, priority ASC, id ASC
-		`)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	list := make([]model.RouteRule, 0)
-	for rows.Next() {
-		var r model.RouteRule
-		var enabled int
-		if err := rows.Scan(&r.ID, &r.NodeID, &r.Name, &r.Priority, &r.PresetType, &r.MatchJSON, &r.Action, &r.OutboundTag, &enabled, &r.CreatedAt, &r.UpdatedAt); err != nil {
-			return nil, err
-		}
-		r.Enabled = enabled != 0
-		list = append(list, r)
-	}
-	return list, rows.Err()
-}
-
-func (s *Store) CreateSyncTarget(ctx context.Context, t *model.SyncTarget) error {
-	if t.SyncMode == "" {
-		t.SyncMode = "independent"
-	}
-	if t.SubFormat == "" {
-		t.SubFormat = "base64"
-	}
-	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO sync_targets (name, target_type, enabled, endpoint_url, auth_token_enc, target_ref, sync_mode, sub_format)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, t.Name, t.TargetType, boolToInt(t.Enabled), t.EndpointURL, t.AuthTokenEnc, t.TargetRef, t.SyncMode, t.SubFormat)
-	if err != nil {
-		return err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return err
-	}
-	t.ID = id
-	return nil
-}
-
-func (s *Store) ListSyncTargets(ctx context.Context) ([]model.SyncTarget, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, target_type, enabled, endpoint_url, auth_token_enc, target_ref, sync_mode, sub_format, last_sync_status, last_sync_http_code, last_sync_error, last_synced_at, created_at, updated_at
-		FROM sync_targets ORDER BY id ASC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	list := make([]model.SyncTarget, 0)
-	for rows.Next() {
-		var t model.SyncTarget
-		var enabled int
-		var synced sql.NullTime
-		if err := rows.Scan(&t.ID, &t.Name, &t.TargetType, &enabled, &t.EndpointURL, &t.AuthTokenEnc, &t.TargetRef, &t.SyncMode, &t.SubFormat, &t.LastSyncStatus, &t.LastSyncHTTPCode, &t.LastSyncError, &synced, &t.CreatedAt, &t.UpdatedAt); err != nil {
-			return nil, err
-		}
-		t.Enabled = enabled != 0
-		if synced.Valid {
-			ts := synced.Time
-			t.LastSyncedAt = &ts
-		}
-		list = append(list, t)
-	}
-	return list, rows.Err()
 }
 
 // --- Traffic Stats ---

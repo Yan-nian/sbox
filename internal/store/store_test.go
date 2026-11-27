@@ -176,9 +176,9 @@ INSERT INTO upstream_subs (name, url) VALUES ('Upstream A', 'https://example.com
 	if err != nil || len(inbounds) != 1 || inbounds[0].Tag != "vless-main" || inbounds[0].NodeID != 1 || inbounds[0].DownloadBytes != 200 {
 		t.Fatalf("legacy inbound lost or wrong node_id: %+v err=%v", inbounds, err)
 	}
-	subs, err := st.ListUpstreamSubs(ctx)
-	if err != nil || len(subs) != 1 || subs[0].NodeID != 0 {
-		t.Fatalf("legacy upstream_sub lost or wrong node_id: %+v err=%v", subs, err)
+	subs, err := st.ListUpstreamSubs(ctx, 0)
+	if err != nil || len(subs) != 1 || subs[0].NodeID != 0 || subs[0].Tag == "" {
+		t.Fatalf("legacy upstream_sub lost or wrong node_id/tag: %+v err=%v", subs, err)
 	}
 
 	// 3. Remote node id=2 can create an inbound with the exact same tag ("vless-main") and separate traffic!

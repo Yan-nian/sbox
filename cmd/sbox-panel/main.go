@@ -392,6 +392,7 @@ func runServe(args []string) error {
 	if err != nil {
 		return fmt.Errorf("init api server: %w", err)
 	}
+	defer apiServer.StopAutoSync()
 
 	if err := apiServer.RecompileAndApplyNode(ctx, 1); err != nil {
 		log.Printf("warn: build initial sing-box config: %v", err)
@@ -421,6 +422,34 @@ func runServe(args []string) error {
 				return
 			case <-ticker.C:
 				apiServer.RenewDueCertificates(ctx)
+			}
+		}
+	}()
+
+	// Background upstream outbound subscription sync scheduler (checks every 5m for due subscriptions)
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				apiServer.SyncDueUpstreams(ctx)
+			}
+		}
+	}()
+
+	// Background remote encrypted GitHub backup scheduler (checks every 30m if interval_hours is due)
+	go func() {
+		ticker := time.NewTicker(30 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				apiServer.RunScheduledRemoteBackupIfDue(ctx)
 			}
 		}
 	}()

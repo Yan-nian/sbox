@@ -122,6 +122,7 @@ func (s *Server) handleCreateMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.RecompileAllOnlineNodes(ctx)
+	s.TriggerAutoSync()
 	if s.telemetry != nil {
 		s.telemetry.PublishLog("info", "panel", fmt.Sprintf("created global member %q (synced to all online nodes)", m.Name))
 	}
@@ -181,6 +182,7 @@ func (s *Server) handleUpdateMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.RecompileAllOnlineNodes(ctx)
+	s.TriggerAutoSync()
 	writeJSON(w, http.StatusOK, m)
 }
 
@@ -203,6 +205,7 @@ func (s *Server) handleToggleMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.RecompileAllOnlineNodes(ctx)
+	s.TriggerAutoSync()
 	writeJSON(w, http.StatusOK, m)
 }
 
@@ -239,6 +242,7 @@ func (s *Server) handleResetMemberCredentials(w http.ResponseWriter, r *http.Req
 	}
 
 	s.RecompileAllOnlineNodes(ctx)
+	s.TriggerAutoSync()
 	if s.telemetry != nil {
 		s.telemetry.PublishLog("info", "panel", fmt.Sprintf("reset credentials for global member %q", m.Name))
 	}
@@ -262,5 +266,6 @@ func (s *Server) handleDeleteMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.RecompileAllOnlineNodes(ctx)
+	s.TriggerAutoSync()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

@@ -14,6 +14,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/components/ui/Toast";
 import { Badge, Button, Field, Input, Panel, Select } from "@/components/ui/primitives";
 import { QrCode } from "@/components/QrCode";
+import { BackupRecoverySection } from "@/components/BackupRecoverySection";
 import type { CertificateItem, SettingsData, TOTPSetupResponse } from "@/types/api";
 
 export function SettingsPage() {
@@ -569,6 +570,9 @@ export function SettingsPage() {
           </form>
         </Panel>
       </div>
+
+      {/* Milestone 5: Local & Remote AES-256-GCM Backup & Disaster Recovery */}
+      <BackupRecoverySection />
     </div>
   );
 }

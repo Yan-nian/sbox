@@ -17,15 +17,20 @@ type ClashAPIConfig struct {
 
 // BuildInput holds all dynamic inputs required to compile a modern sing-box 1.12+ config.
 type BuildInput struct {
-	LogLevel      string
-	CacheFilePath string
-	ClashAPI      ClashAPIConfig
-	Inbounds      []InboundSpec
-	RawInbounds   []json.RawMessage
-	RawOutbounds  []json.RawMessage
-	RawEndpoints  []json.RawMessage
-	RawRouteRules []json.RawMessage
-	OverridePatch string
+	LogLevel        string
+	CacheFilePath   string
+	ClashAPI        ClashAPIConfig
+	Inbounds        []InboundSpec
+	RawInbounds     []json.RawMessage
+	UpstreamGroups  []UpstreamGroupSpec
+	ExtraOutbounds  []ExtraOutboundSpec
+	RawOutbounds    []json.RawMessage
+	RawEndpoints    []json.RawMessage
+	RuleSets        []RuleSetSpec
+	RouteRules      []RouteRuleSpec
+	RawRouteRules   []json.RawMessage
+	DefaultOutbound string
+	OverridePatch   string
 }
 
 var validLogLevels = map[string]bool{
@@ -72,40 +77,112 @@ func Build(in BuildInput) ([]byte, error) {
 		return nil, err
 	}
 
+	rawEndpoints, err := decodeRawList("endpoints", in.RawEndpoints)
+	if err != nil {
+		return nil, err
+	}
+
+	// Track all outbound & endpoint tags to deduplicate and validate route.final.
+	seenTargetTags := make(map[string]struct{})
 	hasDirect := false
 	for _, ob := range rawOutbounds {
 		if m, ok := ob.(map[string]any); ok {
-			if tag, ok := m["tag"].(string); ok && tag == "direct" {
-				hasDirect = true
-				break
+			if tag, ok := m["tag"].(string); ok && strings.TrimSpace(tag) != "" {
+				if tag == "direct" {
+					hasDirect = true
+				}
+				seenTargetTags[tag] = struct{}{}
 			}
 		}
 	}
-	outbounds := make([]any, 0, len(rawOutbounds)+1)
+	for _, ep := range rawEndpoints {
+		if m, ok := ep.(map[string]any); ok {
+			if tag, ok := m["tag"].(string); ok && strings.TrimSpace(tag) != "" {
+				seenTargetTags[tag] = struct{}{}
+			}
+		}
+	}
+
+	outbounds := make([]any, 0, len(rawOutbounds)+len(in.ExtraOutbounds)+1)
 	if !hasDirect {
 		outbounds = append(outbounds, map[string]any{
 			"type": "direct",
 			"tag":  "direct",
 		})
+		seenTargetTags["direct"] = struct{}{}
 	}
-	outbounds = append(outbounds, rawOutbounds...)
 
-	endpoints, err := decodeRawList("endpoints", in.RawEndpoints)
+	endpoints := make([]any, 0, len(rawEndpoints)+len(in.ExtraOutbounds))
+	endpoints = append(endpoints, rawEndpoints...)
+
+	// Compile structured ExtraOutbounds (warp/wireguard -> endpoints; socks/http/raw -> outbounds).
+	for _, spec := range in.ExtraOutbounds {
+		comp, err := compileExtraOutbound(spec)
+		if err != nil {
+			return nil, err
+		}
+		if _, dup := seenTargetTags[comp.tag]; dup {
+			return nil, fmt.Errorf("configgen: duplicate outbound/endpoint tag %q", comp.tag)
+		}
+		seenTargetTags[comp.tag] = struct{}{}
+		if comp.isEndpoint {
+			endpoints = append(endpoints, comp.obj)
+		} else {
+			outbounds = append(outbounds, comp.obj)
+		}
+	}
+
+	// Compile structured UpstreamGroups (selector + optional urltest + parsed nodes).
+	upstreamOutbounds, err := compileUpstreamGroups(in.UpstreamGroups, seenTargetTags)
 	if err != nil {
 		return nil, err
 	}
+	outbounds = append(outbounds, upstreamOutbounds...)
+	outbounds = append(outbounds, rawOutbounds...)
 
+	// Compile structured RouteRules (priority-sorted) + RawRouteRules.
+	structuredRules, referencedRuleSets, err := compileStructuredRouteRules(in.RouteRules)
+	if err != nil {
+		return nil, err
+	}
 	rawRouteRules, err := decodeRawList("route.rules", in.RawRouteRules)
 	if err != nil {
 		return nil, err
 	}
-	routeRules := make([]any, 0, len(rawRouteRules)+1)
-	if !hasSniffRule(rawRouteRules) {
+
+	combinedRules := make([]any, 0, len(structuredRules)+len(rawRouteRules))
+	combinedRules = append(combinedRules, structuredRules...)
+	combinedRules = append(combinedRules, rawRouteRules...)
+
+	routeRules := make([]any, 0, len(combinedRules)+1)
+	if !hasSniffRule(combinedRules) {
 		routeRules = append(routeRules, map[string]any{
 			"action": "sniff",
 		})
 	}
-	routeRules = append(routeRules, rawRouteRules...)
+	routeRules = append(routeRules, combinedRules...)
+
+	// Assemble deduplicated remote .srs rule_set list (explicit + builtin auto-resolved).
+	ruleSets, err := compileRuleSets(in.RuleSets, referencedRuleSets)
+	if err != nil {
+		return nil, err
+	}
+
+	routeFinal := "direct"
+	if cand := strings.TrimSpace(in.DefaultOutbound); cand != "" {
+		if _, exists := seenTargetTags[cand]; exists {
+			routeFinal = cand
+		}
+	}
+
+	routeDoc := map[string]any{
+		"rules":                   routeRules,
+		"final":                   routeFinal,
+		"default_domain_resolver": "dns-local",
+	}
+	if len(ruleSets) > 0 {
+		routeDoc["rule_set"] = ruleSets
+	}
 
 	cacheFile := map[string]any{
 		"enabled": true,
@@ -141,11 +218,7 @@ func Build(in BuildInput) ([]byte, error) {
 		},
 		"inbounds":  inbounds,
 		"outbounds": outbounds,
-		"route": map[string]any{
-			"rules":                   routeRules,
-			"final":                   "direct",
-			"default_domain_resolver": "dns-local",
-		},
+		"route":     routeDoc,
 		"experimental": map[string]any{
 			"cache_file": cacheFile,
 			"clash_api":  clashAPI,

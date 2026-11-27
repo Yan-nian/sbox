@@ -11,6 +11,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -51,6 +52,11 @@ type Server struct {
 	basePath  atomic.Value // string
 	decoyHTML atomic.Value // string
 	apiRouter chi.Router
+
+	autoSyncMu     sync.Mutex
+	autoSyncTimer  *time.Timer
+	autoSyncDelay  time.Duration
+	autoSyncClosed bool
 }
 
 // NewServer creates and wires the HTTP server handler.
@@ -88,6 +94,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		panelVersion:      cfg.PanelVersion,
 		startedAt:         cfg.StartedAt,
 		onPanelCertChange: cfg.OnPanelCertChange,
+		autoSyncDelay:     3 * time.Second,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -131,6 +138,10 @@ func (s *Server) SetDecoyHTML(html string) {
 func (s *Server) buildAPIRouter() chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
+
+	// Milestone 5: Public Client Subscription Endpoint ({web_base_path}/sub/{token}, token-authenticated)
+	r.Get("/sub/{token}", s.handlePublicSubscription)
+	r.Head("/sub/{token}", s.handlePublicSubscription)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Public auth routes
@@ -214,6 +225,55 @@ func (s *Server) buildAPIRouter() chi.Router {
 			// Milestone 2/3: Historical Traffic Stats (cluster-wide or node-scoped)
 			r.Get("/traffic/stats", s.handleTrafficStats)
 			r.Post("/traffic/reset", s.handleTrafficReset)
+
+			// Milestone 4: Upstream Outbound Subscriptions
+			r.Get("/upstreams", s.handleListUpstreams)
+			r.Post("/upstreams", s.handleCreateUpstream)
+			r.Put("/upstreams/{id}", s.handleUpdateUpstream)
+			r.Post("/upstreams/{id}/sync", s.handleSyncUpstream)
+			r.Delete("/upstreams/{id}", s.handleDeleteUpstream)
+
+			// Milestone 4: Extra Outbounds & One-Click Cloudflare WARP
+			r.Get("/outbounds", s.handleListOutbounds)
+			r.Post("/outbounds", s.handleCreateOutbound)
+			r.Post("/outbounds/warp/register", s.handleRegisterWARP)
+			r.Put("/outbounds/{id}", s.handleUpdateOutbound)
+			r.Post("/outbounds/{id}/toggle", s.handleToggleOutbound)
+			r.Delete("/outbounds/{id}", s.handleDeleteOutbound)
+
+			// Milestone 4: Live Clash API Proxy Groups
+			r.Get("/proxies", s.handleListProxies)
+			r.Post("/proxies/delay", s.handleProxyDelay)
+			r.Put("/proxies/select", s.handleSelectProxy)
+
+			// Milestone 4: Visual Routing Rules & Presets
+			r.Get("/routing/presets", s.handleListRoutingPresets)
+			r.Get("/routing/rules", s.handleListRoutingRules)
+			r.Post("/routing/rules", s.handleCreateRoutingRule)
+			r.Put("/routing/rules/{id}", s.handleUpdateRoutingRule)
+			r.Post("/routing/rules/reorder", s.handleReorderRoutingRules)
+			r.Post("/routing/rules/apply-preset", s.handleApplyRoutingPreset)
+			r.Delete("/routing/rules/{id}", s.handleDeleteRoutingRule)
+			r.Put("/routing/default-outbound", s.handleSetDefaultOutbound)
+
+			// Milestone 5: Cluster Client Subscriptions, Remote Sync Push & Encrypted Backup
+			r.Get("/subscriptions/preview", s.handleSubscriptionPreview)
+
+			r.Get("/sync-targets", s.handleListSyncTargets)
+			r.Post("/sync-targets", s.handleCreateSyncTarget)
+			r.Put("/sync-targets/{id}", s.handleUpdateSyncTarget)
+			r.Delete("/sync-targets/{id}", s.handleDeleteSyncTarget)
+			r.Post("/sync-targets/{id}/push", s.handlePushSyncTarget)
+			r.Post("/sync-targets/push-all", s.handlePushAllSyncTargets)
+			r.Get("/sync-targets/history", s.handleListSyncHistory)
+
+			r.Post("/backup/export", s.handleBackupExport)
+			r.Post("/backup/restore", s.handleBackupRestore)
+			r.Get("/backup/remote/config", s.handleGetRemoteBackupConfig)
+			r.Put("/backup/remote/config", s.handleUpdateRemoteBackupConfig)
+			r.Post("/backup/remote/push", s.handleRemoteBackupPush)
+			r.Get("/backup/remote/list", s.handleRemoteBackupList)
+			r.Post("/backup/remote/restore", s.handleRemoteBackupRestore)
 		})
 	})
 
@@ -256,7 +316,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		relPath = "/"
 	}
 
-	if relPath == "/api" || strings.HasPrefix(relPath, "/api/") {
+	if relPath == "/api" || strings.HasPrefix(relPath, "/api/") || strings.HasPrefix(relPath, "/sub/") {
 		r2 := r.Clone(r.Context())
 		u := *r.URL
 		u.Path = relPath

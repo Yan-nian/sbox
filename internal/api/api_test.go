@@ -109,11 +109,14 @@ func (m *mockCore) Rollback(_ context.Context) error             { return m.roll
 func (m *mockCore) DetectBinaryVersion(_ string) (string, error) { return "1.12.0", nil }
 
 type mockTelemetry struct {
-	mu       sync.Mutex
-	logs     []telemetry.LogEntry
-	conns    []telemetry.ConnectionItem
-	closedID string
-	logSubs  []chan telemetry.LogEntry
+	mu            sync.Mutex
+	logs          []telemetry.LogEntry
+	conns         []telemetry.ConnectionItem
+	closedID      string
+	logSubs       []chan telemetry.LogEntry
+	proxyGroups   []telemetry.ProxyGroupInfo
+	selectedGroup string
+	selectedProxy string
 }
 
 func newMockTelemetry() *mockTelemetry {
@@ -123,6 +126,15 @@ func newMockTelemetry() *mockTelemetry {
 		},
 		conns: []telemetry.ConnectionItem{
 			{ID: "conn-1", Inbound: "vless-in", User: "alice", Network: "tcp", Destination: "example.com:443", Chains: []string{"direct"}, Upload: 128, Download: 512},
+		},
+		proxyGroups: []telemetry.ProxyGroupInfo{
+			{
+				Name:   "airport",
+				Type:   "Selector",
+				Now:    "airport-jp-1",
+				All:    []string{"airport-auto", "airport-jp-1", "airport-sg-1"},
+				Delays: map[string]int{"airport-jp-1": 45, "airport-sg-1": 88},
+			},
 		},
 	}
 }
@@ -187,6 +199,24 @@ func (t *mockTelemetry) CloseConnection(_ context.Context, id string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.closedID = id
+	return nil
+}
+func (t *mockTelemetry) ListProxyGroups(_ context.Context) ([]telemetry.ProxyGroupInfo, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]telemetry.ProxyGroupInfo(nil), t.proxyGroups...), nil
+}
+func (t *mockTelemetry) TestProxyDelay(_ context.Context, proxyName, _ string, _ int) (int, error) {
+	if proxyName == "airport-sg-1" {
+		return 77, nil
+	}
+	return 42, nil
+}
+func (t *mockTelemetry) SelectProxy(_ context.Context, groupName, proxyName string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.selectedGroup = groupName
+	t.selectedProxy = proxyName
 	return nil
 }
 

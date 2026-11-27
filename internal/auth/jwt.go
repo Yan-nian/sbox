@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -25,6 +26,7 @@ type Claims struct {
 
 // TokenManager issues and verifies HS256 JWT tokens.
 type TokenManager struct {
+	mu     sync.RWMutex
 	secret []byte
 	ttl    time.Duration
 }
@@ -40,9 +42,27 @@ func NewTokenManager(secret string, ttl time.Duration) *TokenManager {
 	}
 }
 
+// SetSecret updates the HMAC signing secret atomically (used after backup restore).
+func (tm *TokenManager) SetSecret(secret string) {
+	if secret == "" {
+		return
+	}
+	tm.mu.Lock()
+	tm.secret = []byte(secret)
+	tm.mu.Unlock()
+}
+
+func (tm *TokenManager) getSecret() []byte {
+	tm.mu.RLock()
+	sec := append([]byte(nil), tm.secret...)
+	tm.mu.RUnlock()
+	return sec
+}
+
 // IssueToken creates a signed HS256 JWT for username.
 func (tm *TokenManager) IssueToken(username string) (string, error) {
-	if len(tm.secret) == 0 {
+	sec := tm.getSecret()
+	if len(sec) == 0 {
 		return "", errors.New("empty jwt secret")
 	}
 	now := time.Now().UTC()
@@ -56,7 +76,7 @@ func (tm *TokenManager) IssueToken(username string) (string, error) {
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(tm.secret)
+	return token.SignedString(sec)
 }
 
 // VerifyToken validates signature, algorithm, and expiry, returning parsed Claims.
@@ -65,11 +85,12 @@ func (tm *TokenManager) VerifyToken(tokenStr string) (*Claims, error) {
 	if tokenStr == "" {
 		return nil, errors.New("missing token")
 	}
+	sec := tm.getSecret()
 	parsed, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok || t.Method.Alg() != jwt.SigningMethodHS256.Alg() {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
-		return tm.secret, nil
+		return sec, nil
 	})
 	if err != nil {
 		return nil, err

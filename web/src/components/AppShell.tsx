@@ -37,17 +37,16 @@ export type AppRoute =
   | "/inbounds"
   | "/members"
   | "/certs"
+  | "/routing"
+  | "/subscriptions"
   | "/core"
   | "/connections"
-  | "/settings"
-  | "/routing"
-  | "/sync";
+  | "/settings";
 
 interface NavItem {
   route: AppRoute;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
-  milestone?: string;
 }
 
 export const ACTIVE_NAV_ITEMS: NavItem[] = [
@@ -56,14 +55,11 @@ export const ACTIVE_NAV_ITEMS: NavItem[] = [
   { route: "/inbounds", label: "入站节点", icon: Radio },
   { route: "/members", label: "成员管理", icon: Users },
   { route: "/certs", label: "证书中心", icon: Shield },
+  { route: "/routing", label: "出站与分流", icon: GitBranch },
+  { route: "/subscriptions", label: "订阅与同步", icon: Globe },
   { route: "/core", label: "核心与日志", icon: Cpu },
   { route: "/connections", label: "活跃连接", icon: Network },
   { route: "/settings", label: "安全与设置", icon: Settings },
-];
-
-export const ROADMAP_NAV_ITEMS: NavItem[] = [
-  { route: "/routing", label: "出站与分流", icon: GitBranch, milestone: "M4" },
-  { route: "/sync", label: "订阅与同步", icon: Globe, milestone: "M4" },
 ];
 
 const ROUTE_TITLES: Record<AppRoute, string> = {
@@ -72,11 +68,11 @@ const ROUTE_TITLES: Record<AppRoute, string> = {
   "/inbounds": "入站节点",
   "/members": "成员管理",
   "/certs": "证书中心",
+  "/routing": "出站与分流",
+  "/subscriptions": "订阅与同步",
   "/core": "核心与日志",
   "/connections": "活跃连接",
   "/settings": "安全与设置",
-  "/routing": "出站与分流",
-  "/sync": "订阅与同步",
 };
 
 interface AppShellProps {
@@ -246,45 +242,6 @@ export function AppShell({
                   {!isCompact && item.route === "/nodes" && nodes.length > 0 && (
                     <span className="rounded border border-hairline bg-recessed px-1.5 py-0.2 font-mono text-[10px] text-ink-secondary tabular-nums">
                       {onlineCount}/{nodes.length}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="border-t border-hairline pt-4">
-          {!isCompact && (
-            <div className="mb-1.5 px-2.5 text-[11px] font-medium text-ink-muted">
-              规划模块
-            </div>
-          )}
-          <div className="space-y-0.5">
-            {ROADMAP_NAV_ITEMS.map((item) => {
-              const Icon = item.icon;
-              const active = route === item.route;
-              return (
-                <button
-                  key={item.route}
-                  type="button"
-                  onClick={() => handleSelect(item.route)}
-                  title={isCompact ? `${item.label} (${item.milestone})` : undefined}
-                  className={cn(
-                    "flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-sm transition-colors",
-                    isCompact && "justify-center px-0 py-2",
-                    active
-                      ? "bg-surface-hover font-medium text-ink"
-                      : "text-ink-muted hover:bg-surface-hover hover:text-ink-secondary",
-                  )}
-                >
-                  <span className="flex items-center gap-2.5 truncate">
-                    <Icon className="h-4 w-4 shrink-0" />
-                    {!isCompact && <span className="truncate">{item.label}</span>}
-                  </span>
-                  {!isCompact && item.milestone && (
-                    <span className="rounded border border-hairline px-1 py-0.2 font-mono text-[10px] text-ink-muted">
-                      {item.milestone}
                     </span>
                   )}
                 </button>

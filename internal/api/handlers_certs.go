@@ -124,6 +124,7 @@ func (s *Server) handleCreateSelfSignedCert(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	s.TriggerAutoSync()
 	if s.telemetry != nil {
 		s.telemetry.PublishLog("info", "panel", fmt.Sprintf("generated self-signed certificate %q on node %d (%s)", rec.Name, nodeID, strings.Join(rec.Domains, ",")))
 	}
@@ -185,6 +186,7 @@ func (s *Server) handleCreateExternalCert(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	s.TriggerAutoSync()
 	if s.telemetry != nil {
 		s.telemetry.PublishLog("info", "panel", fmt.Sprintf("imported external certificate %q on node %d from %s", rec.Name, nodeID, rec.CertPath))
 	}
@@ -291,6 +293,7 @@ func (s *Server) handleCreateACMECert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.TriggerAutoSync()
 	if s.telemetry != nil {
 		s.telemetry.PublishLog("info", "panel", fmt.Sprintf("issued ACME (%s) certificate %q on node %d for %s", req.Challenge, rec.Name, nodeID, strings.Join(rec.Domains, ",")))
 	}
@@ -366,6 +369,7 @@ func (s *Server) renewCertificateRecord(ctx context.Context, c *model.Certificat
 	}
 
 	_ = s.RecompileAndApplyNode(ctx, c.NodeID)
+	s.TriggerAutoSync()
 	if c.NodeID == 1 {
 		if ps, err := s.store.GetPanelSettings(ctx); err == nil && ps.PanelCertID == c.ID && s.onPanelCertChange != nil {
 			s.onPanelCertChange()
@@ -492,6 +496,7 @@ func (s *Server) handleDeleteCertificate(w http.ResponseWriter, r *http.Request)
 	if inRefCount > 0 {
 		_ = s.RecompileAndApplyNode(ctx, c.NodeID)
 	}
+	s.TriggerAutoSync()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

@@ -72,10 +72,11 @@ func (s *Server) buildNodeView(n model.Node, inboundCount int) model.NodeView {
 		Hostname:      n.Hostname,
 		AgentVersion:  n.AgentVersion,
 		DataDir:       n.DataDir,
-		PublicIPv4:    n.PublicIPv4,
-		PublicIPv6:    n.PublicIPv6,
-		OverridePatch: n.OverridePatch,
-		LogLevel:      n.LogLevel,
+		PublicIPv4:      n.PublicIPv4,
+		PublicIPv6:      n.PublicIPv6,
+		OverridePatch:   n.OverridePatch,
+		DefaultOutbound: n.DefaultOutbound,
+		LogLevel:        n.LogLevel,
 		GithubProxy:   n.GithubProxy,
 		LastSeenAt:    n.LastSeenAt,
 		Note:          n.Note,
@@ -221,6 +222,7 @@ func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	view := s.buildNodeView(*n, 0)
+	s.TriggerAutoSync()
 	if s.telemetry != nil {
 		s.telemetry.PublishLog("info", "panel", fmt.Sprintf("created remote node %q (id=%d)", n.Name, n.ID))
 	}
@@ -320,6 +322,7 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	if logLevelChanged {
 		_ = s.RecompileAndApplyNode(ctx, n.ID)
 	}
+	s.TriggerAutoSync()
 
 	counts, _ := s.store.InboundCountsByNode(ctx)
 	writeJSON(w, http.StatusOK, s.buildNodeView(*n, counts[n.ID]))
@@ -394,6 +397,7 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to delete node: "+err.Error())
 		return
 	}
+	s.TriggerAutoSync()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

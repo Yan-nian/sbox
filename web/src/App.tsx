@@ -15,10 +15,11 @@ import { NodesPage } from "@/pages/NodesPage";
 import { InboundsPage } from "@/pages/InboundsPage";
 import { MembersPage } from "@/pages/MembersPage";
 import { CertificatesPage } from "@/pages/CertificatesPage";
+import { RoutingPage } from "@/pages/RoutingPage";
+import { SubscriptionsPage } from "@/pages/SubscriptionsPage";
 import { CoreLogsPage } from "@/pages/CoreLogsPage";
 import { ConnectionsPage } from "@/pages/ConnectionsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
-import { RoadmapPage } from "@/pages/RoadmapPage";
 
 const VALID_ROUTES: ReadonlySet<AppRoute> = new Set([
   "/",
@@ -26,16 +27,17 @@ const VALID_ROUTES: ReadonlySet<AppRoute> = new Set([
   "/inbounds",
   "/members",
   "/certs",
+  "/routing",
+  "/subscriptions",
   "/core",
   "/connections",
   "/settings",
-  "/routing",
-  "/sync",
 ]);
 
 function parseRoute(): AppRoute {
-  const rel = getRelativeRoute() as AppRoute;
-  return VALID_ROUTES.has(rel) ? rel : "/";
+  const rel = getRelativeRoute();
+  if (rel === "/sync") return "/subscriptions";
+  return VALID_ROUTES.has(rel as AppRoute) ? (rel as AppRoute) : "/";
 }
 
 function WorkspaceShell() {
@@ -70,12 +72,11 @@ function WorkspaceShell() {
       {route === "/inbounds" && <InboundsPage onNavigate={navigate} />}
       {route === "/members" && <MembersPage />}
       {route === "/certs" && <CertificatesPage onNavigate={navigate} />}
+      {route === "/routing" && <RoutingPage onNavigate={navigate} />}
+      {route === "/subscriptions" && <SubscriptionsPage />}
       {route === "/core" && <CoreLogsPage live={live} onNavigate={navigate} />}
       {route === "/connections" && <ConnectionsPage onNavigate={navigate} />}
       {route === "/settings" && <SettingsPage />}
-      {(route === "/routing" || route === "/sync") && (
-        <RoadmapPage route={route} onNavigate={navigate} />
-      )}
     </AppShell>
   );
 }

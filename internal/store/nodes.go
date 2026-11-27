@@ -258,7 +258,7 @@ func (s *Store) ensureLocalNode(ctx context.Context) error {
 
 const nodeSelectColumns = `
 	id, name, is_local, token, public_ipv4, public_ipv6,
-	override_patch, log_level, github_proxy,
+	override_patch, default_outbound, log_level, github_proxy,
 	os, arch, hostname, agent_version, core_version, data_dir,
 	last_seen_at, note, created_at, updated_at
 `
@@ -269,7 +269,7 @@ func scanNode(scanner interface{ Scan(dest ...any) error }) (*model.Node, error)
 	var lastSeen sql.NullTime
 	err := scanner.Scan(
 		&n.ID, &n.Name, &isLocal, &n.Token, &n.PublicIPv4, &n.PublicIPv6,
-		&n.OverridePatch, &n.LogLevel, &n.GithubProxy,
+		&n.OverridePatch, &n.DefaultOutbound, &n.LogLevel, &n.GithubProxy,
 		&n.OS, &n.Arch, &n.Hostname, &n.AgentVersion, &n.CoreVersion, &n.DataDir,
 		&lastSeen, &n.Note, &n.CreatedAt, &n.UpdatedAt,
 	)
@@ -279,6 +279,9 @@ func scanNode(scanner interface{ Scan(dest ...any) error }) (*model.Node, error)
 	n.IsLocal = isLocal != 0
 	if n.LogLevel == "" {
 		n.LogLevel = "info"
+	}
+	if strings.TrimSpace(n.DefaultOutbound) == "" {
+		n.DefaultOutbound = "direct"
 	}
 	if lastSeen.Valid {
 		t := lastSeen.Time.UTC()
@@ -331,6 +334,9 @@ func (s *Store) CreateNode(ctx context.Context, n *model.Node) error {
 	if strings.TrimSpace(n.LogLevel) == "" {
 		n.LogLevel = "info"
 	}
+	if strings.TrimSpace(n.DefaultOutbound) == "" {
+		n.DefaultOutbound = "direct"
+	}
 	if !n.IsLocal && strings.TrimSpace(n.Token) == "" {
 		tok, err := RandomHex(32)
 		if err != nil {
@@ -341,12 +347,12 @@ func (s *Store) CreateNode(ctx context.Context, n *model.Node) error {
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO nodes (
 			name, is_local, token, public_ipv4, public_ipv6,
-			override_patch, log_level, github_proxy, note
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			override_patch, default_outbound, log_level, github_proxy, note
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		strings.TrimSpace(n.Name), boolToInt(n.IsLocal), n.Token,
 		strings.TrimSpace(n.PublicIPv4), strings.TrimSpace(n.PublicIPv6),
-		n.OverridePatch, n.LogLevel, strings.TrimSpace(n.GithubProxy), strings.TrimSpace(n.Note),
+		n.OverridePatch, strings.TrimSpace(n.DefaultOutbound), n.LogLevel, strings.TrimSpace(n.GithubProxy), strings.TrimSpace(n.Note),
 	)
 	if err != nil {
 		return err
@@ -366,15 +372,18 @@ func (s *Store) UpdateNode(ctx context.Context, n *model.Node) error {
 	if strings.TrimSpace(n.LogLevel) == "" {
 		n.LogLevel = "info"
 	}
+	if strings.TrimSpace(n.DefaultOutbound) == "" {
+		n.DefaultOutbound = "direct"
+	}
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE nodes SET
 			name = ?, public_ipv4 = ?, public_ipv6 = ?,
-			override_patch = ?, log_level = ?, github_proxy = ?, note = ?,
+			override_patch = ?, default_outbound = ?, log_level = ?, github_proxy = ?, note = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`,
 		strings.TrimSpace(n.Name), strings.TrimSpace(n.PublicIPv4), strings.TrimSpace(n.PublicIPv6),
-		n.OverridePatch, n.LogLevel, strings.TrimSpace(n.GithubProxy), strings.TrimSpace(n.Note),
+		n.OverridePatch, strings.TrimSpace(n.DefaultOutbound), n.LogLevel, strings.TrimSpace(n.GithubProxy), strings.TrimSpace(n.Note),
 		n.ID,
 	)
 	if err != nil {
@@ -508,6 +517,10 @@ func (s *Store) DeleteNode(ctx context.Context, id int64, force bool) error {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM route_rules WHERE node_id = ?`, id); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM upstream_subs WHERE node_id = ?`, id); err != nil {
 			_ = tx.Rollback()
 			return err
 		}

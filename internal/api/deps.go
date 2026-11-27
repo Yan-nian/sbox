@@ -44,6 +44,9 @@ type TelemetryHub interface {
 	SubscribeMetrics() (<-chan telemetry.Snapshot, func())
 	Connections(ctx context.Context) ([]telemetry.ConnectionItem, error)
 	CloseConnection(ctx context.Context, id string) error
+	ListProxyGroups(ctx context.Context) ([]telemetry.ProxyGroupInfo, error)
+	TestProxyDelay(ctx context.Context, proxyName, testURL string, timeoutMS int) (int, error)
+	SelectProxy(ctx context.Context, groupName, proxyName string) error
 }
 
 // ClusterHub is the narrow interface satisfied by *cluster.Hub.
@@ -258,6 +261,24 @@ func (c *fallbackLocalController) CloseConnection(ctx context.Context, id string
 		return nil
 	}
 	return c.tel.CloseConnection(ctx, id)
+}
+func (c *fallbackLocalController) ListProxyGroups(ctx context.Context) ([]telemetry.ProxyGroupInfo, error) {
+	if c.tel == nil {
+		return []telemetry.ProxyGroupInfo{}, nil
+	}
+	return c.tel.ListProxyGroups(ctx)
+}
+func (c *fallbackLocalController) TestProxyDelay(ctx context.Context, proxyName, testURL string, timeoutMS int) (int, error) {
+	if c.tel == nil {
+		return 0, nil
+	}
+	return c.tel.TestProxyDelay(ctx, proxyName, testURL, timeoutMS)
+}
+func (c *fallbackLocalController) SelectProxy(ctx context.Context, groupName, proxyName string) error {
+	if c.tel == nil {
+		return nil
+	}
+	return c.tel.SelectProxy(ctx, groupName, proxyName)
 }
 func (c *fallbackLocalController) ProbeRealityTarget(ctx context.Context, target string) (cert.RealityProbeResult, error) {
 	return cert.ProbeRealityTarget(ctx, target), nil
