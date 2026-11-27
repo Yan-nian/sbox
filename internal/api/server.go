@@ -218,6 +218,7 @@ func (s *Server) buildAPIRouter() chi.Router {
 			// Milestone 2/3: Multi-Protocol Inbounds (node-scoped)
 			r.Get("/inbounds", s.handleListInbounds)
 			r.Get("/inbounds/defaults/{protocol}", s.handleInboundDefaults)
+			r.Get("/inbounds/{id}/links", s.handleInboundLinks)
 			r.Post("/inbounds", s.handleCreateInbound)
 			r.Put("/inbounds/{id}", s.handleUpdateInbound)
 			r.Post("/inbounds/{id}/toggle", s.handleToggleInbound)

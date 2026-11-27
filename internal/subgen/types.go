@@ -67,6 +67,7 @@ type RenderedNode struct {
 	Protocol string `json:"protocol"`
 	NodeName string `json:"node_name"`
 	URI      string `json:"uri"`
+	Loon     string `json:"loon,omitempty"`
 }
 
 // RenderOutput is the complete formatted subscription response.
@@ -238,6 +239,7 @@ func Render(in RenderInput, format string) (*RenderOutput, error) {
 			Protocol: rn.Protocol,
 			NodeName: rn.NodeName,
 			URI:      u,
+			Loon:     renderLoonLine(rn),
 		})
 		if u != "" {
 			uriLines = append(uriLines, u)

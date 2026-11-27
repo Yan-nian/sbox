@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Check,
+  Copy,
   Edit3,
   Globe,
+  Link2,
+  Loader2,
   Plus,
   Radio,
   RefreshCw,
@@ -10,6 +14,7 @@ import {
   Users,
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
+import { copyToClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/cn";
 import { formatBytes } from "@/lib/format";
 import { useNode } from "@/contexts/NodeContext";
@@ -17,6 +22,7 @@ import { useToast } from "@/components/ui/Toast";
 import {
   Badge,
   Button,
+  Modal,
   Panel,
   StatusDot,
   Switch,
@@ -24,7 +30,12 @@ import {
 import { InboundModal, PROTOCOL_OPTIONS } from "@/components/InboundModal";
 import { NodeScopeBanner } from "@/components/NodeScopeBanner";
 import type { AppRoute } from "@/components/AppShell";
-import type { CertificateItem, InboundItem, MemberItem } from "@/types/api";
+import type {
+  CertificateItem,
+  InboundItem,
+  InboundLinkItem,
+  MemberItem,
+} from "@/types/api";
 
 function describeSecurity(ib: InboundItem, certMap: Map<number, CertificateItem>): string {
   const s = ib.settings || {};
@@ -72,6 +83,14 @@ export function InboundsPage({ onNavigate }: { onNavigate?: (route: AppRoute) =>
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<InboundItem | null>(null);
+
+  // Quick-copy node links modal
+  const [linksTarget, setLinksTarget] = useState<InboundItem | null>(null);
+  const [linkItems, setLinkItems] = useState<InboundLinkItem[]>([]);
+  const [linksLoading, setLinksLoading] = useState(false);
+  const [linksError, setLinksError] = useState<string | null>(null);
+  const [linkFormat, setLinkFormat] = useState<"uri" | "loon">("uri");
+  const [copiedLinkKey, setCopiedLinkKey] = useState<string | null>(null);
 
   const nodeOffline = activeNode ? !activeNode.online : false;
 
@@ -142,6 +161,34 @@ export function InboundsPage({ onNavigate }: { onNavigate?: (route: AppRoute) =>
       toast.error("删除入站失败", err instanceof ApiError ? err.message : undefined);
     } finally {
       setBusyId(null);
+    }
+  };
+
+  const openLinksModal = async (ib: InboundItem) => {
+    setLinksTarget(ib);
+    setLinkItems([]);
+    setLinksError(null);
+    setCopiedLinkKey(null);
+    setLinksLoading(true);
+    try {
+      const res = await api.getInboundLinks(ib.id);
+      setLinkItems(Array.isArray(res.items) ? res.items : []);
+    } catch (err) {
+      setLinksError(err instanceof ApiError ? err.message : "获取节点链接失败");
+    } finally {
+      setLinksLoading(false);
+    }
+  };
+
+  const copyLinkValue = async (key: string, val: string, label: string) => {
+    if (!val) return;
+    const ok = await copyToClipboard(val);
+    if (ok) {
+      setCopiedLinkKey(key);
+      toast.info(`已复制${label}`);
+      window.setTimeout(() => setCopiedLinkKey(null), 1600);
+    } else {
+      toast.error("复制失败");
     }
   };
 
@@ -345,6 +392,18 @@ export function InboundsPage({ onNavigate }: { onNavigate?: (route: AppRoute) =>
 
                       <td className="px-4 py-3 text-right">
                         <div className="inline-flex items-center gap-1.5">
+                          {ib.protocol !== "direct" && (
+                            <Button
+                              variant="secondary"
+                              size="xs"
+                              disabled={isBusy}
+                              onClick={() => void openLinksModal(ib)}
+                            >
+                              <Link2 className="h-3 w-3" />
+                              复制节点
+                            </Button>
+                          )}
+
                           <Button
                             variant="outline"
                             size="xs"
@@ -410,6 +469,193 @@ export function InboundsPage({ onNavigate }: { onNavigate?: (route: AppRoute) =>
         onClose={() => setModalOpen(false)}
         onSaved={loadAll}
       />
+
+      {/* Quick Copy Node Links Modal */}
+      <Modal
+        open={linksTarget !== null}
+        onClose={() => setLinksTarget(null)}
+        title={linksTarget ? `复制节点链接 · ${linksTarget.name}` : "复制节点链接"}
+        description="支持通用标准 URI 与原生 Loon 节点配置行，点击即复制到剪贴板"
+        size="lg"
+        footer={
+          <Button variant="ghost" size="sm" onClick={() => setLinksTarget(null)}>
+            关闭
+          </Button>
+        }
+      >
+        <div className="space-y-4">
+          {/* Format Toggle + One-Click Bar */}
+          <div className="flex flex-wrap items-center justify-between gap-2.5">
+            <div className="inline-flex rounded-md border border-hairline bg-recessed p-0.5 text-xs">
+              <button
+                type="button"
+                onClick={() => setLinkFormat("uri")}
+                className={cn(
+                  "rounded px-2.5 py-1 transition-colors",
+                  linkFormat === "uri"
+                    ? "bg-surface font-medium text-accent"
+                    : "text-ink-muted hover:text-ink",
+                )}
+              >
+                通用 URI (vless:// ...)
+              </button>
+              <button
+                type="button"
+                onClick={() => setLinkFormat("loon")}
+                className={cn(
+                  "rounded px-2.5 py-1 transition-colors",
+                  linkFormat === "loon"
+                    ? "bg-surface font-medium text-accent"
+                    : "text-ink-muted hover:text-ink",
+                )}
+              >
+                Loon 原生行 (节点 = VLESS, ...)
+              </button>
+            </div>
+
+            {!linksLoading && !linksError && linkItems.length === 1 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Button
+                  variant="primary"
+                  size="xs"
+                  disabled={!linkItems[0].uri}
+                  onClick={() =>
+                    void copyLinkValue("quick-uri", linkItems[0].uri, "通用 URI")
+                  }
+                >
+                  {copiedLinkKey === "quick-uri" ? (
+                    <Check className="h-3 w-3" />
+                  ) : (
+                    <Copy className="h-3 w-3" />
+                  )}
+                  {copiedLinkKey === "quick-uri" ? "已复制 URI" : "一键复制 URI"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="xs"
+                  disabled={!linkItems[0].loon}
+                  onClick={() =>
+                    void copyLinkValue("quick-loon", linkItems[0].loon, "Loon 原生行")
+                  }
+                >
+                  {copiedLinkKey === "quick-loon" ? (
+                    <Check className="h-3 w-3 text-ok" />
+                  ) : (
+                    <Copy className="h-3 w-3" />
+                  )}
+                  {copiedLinkKey === "quick-loon" ? "已复制 Loon 行" : "一键复制 Loon 行"}
+                </Button>
+              </div>
+            )}
+
+            {!linksLoading && !linksError && linkItems.length > 1 && (
+              <Button
+                variant="outline"
+                size="xs"
+                onClick={() => {
+                  const joined = linkItems
+                    .map((item) => (linkFormat === "loon" ? item.loon : item.uri))
+                    .filter(Boolean)
+                    .join("\n");
+                  void copyLinkValue(
+                    `all-${linkFormat}`,
+                    joined,
+                    linkFormat === "loon" ? "全部 Loon 节点行" : "全部节点 URI",
+                  );
+                }}
+              >
+                {copiedLinkKey === `all-${linkFormat}` ? (
+                  <Check className="h-3 w-3 text-ok" />
+                ) : (
+                  <Copy className="h-3 w-3" />
+                )}
+                {copiedLinkKey === `all-${linkFormat}`
+                  ? "已复制全部"
+                  : `复制全部 (${linkItems.length})`}
+              </Button>
+            )}
+          </div>
+
+          {linksLoading ? (
+            <div className="flex items-center justify-center gap-2 py-10 text-xs text-ink-muted">
+              <Loader2 className="h-4 w-4 animate-spin text-accent" />
+              <span>正在生成节点链接...</span>
+            </div>
+          ) : linksError ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-danger/45 bg-danger/10 p-3 text-xs text-danger">
+              <span>{linksError}</span>
+              {linksTarget && (
+                <Button
+                  variant="outline"
+                  size="xs"
+                  onClick={() => void openLinksModal(linksTarget)}
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  重试
+                </Button>
+              )}
+            </div>
+          ) : linkItems.length === 0 ? (
+            <div className="rounded-md border border-dashed border-hairline-strong bg-recessed py-9 text-center text-xs text-ink-muted">
+              暂无可复制的节点链接（请先在「成员管理」创建并启用成员，并确认此入站已绑定成员）。
+            </div>
+          ) : (
+            <div className="max-h-[420px] space-y-2.5 overflow-y-auto pr-0.5">
+              {linkItems.map((item, idx) => {
+                const value = linkFormat === "loon" ? item.loon : item.uri;
+                const copyKey = `item-${idx}-${linkFormat}`;
+                const isCopied = copiedLinkKey === copyKey;
+                return (
+                  <div
+                    key={`${item.member_id}-${item.name}-${idx}`}
+                    className="rounded-md border border-hairline bg-recessed/50 p-3"
+                  >
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <Badge tone="neutral" className="font-mono">
+                          <Users className="h-3 w-3" />
+                          {item.member_name}
+                        </Badge>
+                        <span className="font-medium text-ink">{item.name}</span>
+                      </div>
+
+                      <Button
+                        variant={isCopied ? "secondary" : "outline"}
+                        size="xs"
+                        disabled={!value}
+                        onClick={() =>
+                          void copyLinkValue(
+                            copyKey,
+                            value,
+                            `${item.name} (${linkFormat === "loon" ? "Loon 行" : "URI"})`,
+                          )
+                        }
+                      >
+                        {isCopied ? (
+                          <Check className="h-3 w-3 text-ok" />
+                        ) : (
+                          <Copy className="h-3 w-3" />
+                        )}
+                        {isCopied ? "已复制" : "复制"}
+                      </Button>
+                    </div>
+
+                    {value ? (
+                      <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded border border-hairline bg-recessed px-2.5 py-2 font-mono text-[11px] leading-relaxed text-ink select-all">
+                        {value}
+                      </pre>
+                    ) : (
+                      <div className="rounded border border-hairline bg-recessed px-2.5 py-2 text-[11px] text-ink-muted">
+                        当前协议暂不支持{linkFormat === "loon" ? " Loon 原生行" : "通用 URI"}格式
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </Modal>
     </div>
   );
 }

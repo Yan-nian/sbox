@@ -299,3 +299,154 @@ func (s *Server) handleSubscriptionPreview(w http.ResponseWriter, r *http.Reques
 		"nodes":   out.Nodes,
 	})
 }
+
+type inboundLinkItem struct {
+	MemberID   int64  `json:"member_id"`
+	MemberName string `json:"member_name"`
+	Name       string `json:"name"`
+	URI        string `json:"uri"`
+	Loon       string `json:"loon"`
+}
+
+// handleInboundLinks serves GET /api/v1/inbounds/{id}/links returning per-member standard URI and native Loon lines.
+func (s *Server) handleInboundLinks(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid inbound id")
+		return
+	}
+
+	ib, err := s.store.GetInbound(ctx, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "inbound not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load inbound")
+		return
+	}
+
+	items := make([]inboundLinkItem, 0)
+	if strings.EqualFold(strings.TrimSpace(ib.Protocol), "direct") {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"inbound_id":   ib.ID,
+			"inbound_name": ib.Name,
+			"protocol":     ib.Protocol,
+			"items":        items,
+		})
+		return
+	}
+
+	ps, _ := s.store.GetPanelSettings(ctx)
+	instanceID := strings.TrimSpace(ps.InstanceID)
+	if instanceID == "" {
+		instanceID = "sbox-panel"
+	}
+
+	node, err := s.store.GetNode(ctx, ib.NodeID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load inbound node")
+		return
+	}
+
+	v4 := strings.TrimSpace(node.PublicIPv4)
+	v6 := strings.TrimSpace(node.PublicIPv6)
+	if node.IsLocal {
+		if v4 == "" {
+			v4 = strings.TrimSpace(ps.PublicIPv4)
+		}
+		if v6 == "" {
+			v6 = strings.TrimSpace(ps.PublicIPv6)
+		}
+		if v4 == "" && v6 == "" {
+			if fallbackHost := extractNonLoopbackHost(r); fallbackHost != "" {
+				if ip := net.ParseIP(fallbackHost); ip != nil && ip.To4() == nil {
+					v6 = fallbackHost
+				} else {
+					v4 = fallbackHost
+				}
+			}
+		}
+	}
+
+	nodeEp := subgen.NodeEndpoint{
+		NodeID:     node.ID,
+		NodeName:   node.Name,
+		PublicIPv4: v4,
+		PublicIPv6: v6,
+	}
+
+	extras := make([]subgen.ExtraEntry, 0, len(ib.ExtraEntries))
+	for _, ex := range ib.ExtraEntries {
+		extras = append(extras, subgen.ExtraEntry{
+			Name: ex.Name,
+			Host: ex.Host,
+			Port: ex.Port,
+		})
+	}
+	ibEntry := subgen.InboundEntry{
+		ID:           ib.ID,
+		NodeID:       ib.NodeID,
+		Name:         ib.Name,
+		Tag:          ib.Tag,
+		Protocol:     ib.Protocol,
+		ListenPort:   ib.ListenPort,
+		Settings:     ib.Settings,
+		ExternalHost: ib.ExternalHost,
+		ExternalPort: ib.ExternalPort,
+		ExtraEntries: extras,
+	}
+	if ib.CertificateID != nil && *ib.CertificateID > 0 {
+		if c, err := s.store.GetCertificate(ctx, *ib.CertificateID); err == nil {
+			ibEntry.CertSelfSigned = c.Type == "self_signed"
+			ibEntry.CertFingerprint = c.Fingerprint
+			ibEntry.CertDomains = c.Domains
+		}
+	}
+
+	members, err := s.store.ListMembers(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list members")
+		return
+	}
+
+	for _, m := range members {
+		if !m.Enabled || !memberBoundToInbound(*ib, m.ID) {
+			continue
+		}
+		out, renderErr := subgen.Render(subgen.RenderInput{
+			InstanceID: instanceID,
+			Member: subgen.MemberCred{
+				ID:          m.ID,
+				Name:        m.Name,
+				UUID:        m.UUID,
+				Password:    m.Password,
+				SS2022Key16: m.SS2022Key16,
+				SS2022Key32: m.SS2022Key32,
+				SubToken:    m.SubToken,
+			},
+			Nodes:    []subgen.NodeEndpoint{nodeEp},
+			Inbounds: []subgen.InboundEntry{ibEntry},
+		}, "uri")
+		if renderErr != nil {
+			continue
+		}
+		for _, rn := range out.Nodes {
+			items = append(items, inboundLinkItem{
+				MemberID:   m.ID,
+				MemberName: m.Name,
+				Name:       rn.Name,
+				URI:        rn.URI,
+				Loon:       rn.Loon,
+			})
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"inbound_id":   ib.ID,
+		"inbound_name": ib.Name,
+		"protocol":     ib.Protocol,
+		"items":        items,
+	})
+}

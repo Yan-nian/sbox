@@ -595,3 +595,78 @@ func TestHostResolutionPriorityUniqueNamesAndEdgeCases(t *testing.T) {
 		t.Errorf("expected error for unsupported format")
 	}
 }
+
+func TestRenderLoonAllProtocols(t *testing.T) {
+	in := sampleClusterInput()
+	nodes, err := RenderLoon(in)
+	if err != nil {
+		t.Fatalf("RenderLoon failed: %v", err)
+	}
+	// 16 non-direct inbounds + 2 extra_entries on Hysteria2 = 18 nodes
+	if len(nodes) != 18 {
+		t.Fatalf("expected 18 Loon nodes, got %d", len(nodes))
+	}
+
+	byName := make(map[string]LoonRenderedNode, len(nodes))
+	for _, n := range nodes {
+		byName[n.Name] = n
+	}
+
+	// Verify VLESS Reality Loon syntax
+	vlessReality := byName["[JP-Tokyo] VLESS Reality"].Line
+	wantVLESS := `[JP-Tokyo] VLESS Reality = VLESS, 203.0.113.10, 443, "11111111-2222-3333-4444-555555555555", transport=tcp, flow=xtls-rprx-vision, public-key="PUBKEY_XYZ123", short-id=a1b2c3d4, over-tls=true, sni=www.microsoft.com, udp=true`
+	if vlessReality != wantVLESS {
+		t.Errorf("VLESS Reality Loon mismatch:\n got: %s\nwant: %s", vlessReality, wantVLESS)
+	}
+
+	// Verify VLESS WS + self-signed TLS
+	vlessWS := byName["[JP-Tokyo] VLESS WS"].Line
+	for _, sub := range []string{"= VLESS, ws.jp.example.com, 8443", "transport=ws", "path=/chat", "host=cdn.example.com", "over-tls=true", "skip-cert-verify=true", "udp=true"} {
+		if !strings.Contains(vlessWS, sub) {
+			t.Errorf("VLESS WS Loon missing %q: %s", sub, vlessWS)
+		}
+	}
+
+	// Verify Hysteria2 with salamander obfs & self-signed cert
+	hy2 := byName["[JP-Tokyo] Hysteria2"].Line
+	for _, sub := range []string{"= Hysteria2, hy2.example.com, 4430", `salamander-password="salamander-secret"`, "sni=hy2.example.com", "skip-cert-verify=true", "udp=true"} {
+		if !strings.Contains(hy2, sub) {
+			t.Errorf("Hysteria2 Loon missing %q: %s", sub, hy2)
+		}
+	}
+
+	// Verify TUIC v5, AnyTLS, Shadowsocks SS-2022, Trojan, SOCKS5, HTTP
+	tuic := byName["[US-LA] TUIC v5"].Line
+	if !strings.Contains(tuic, "= TUIC, 2001:db8::20, 5443") || !strings.Contains(tuic, "version=5") || !strings.Contains(tuic, "skip-cert-verify=true") {
+		t.Errorf("unexpected TUIC Loon line: %s", tuic)
+	}
+	anytls := byName["[JP-Tokyo] AnyTLS"].Line
+	if !strings.Contains(anytls, "= AnyTLS, any.jp.example.com, 6443") || !strings.Contains(anytls, "skip-cert-verify=false") {
+		t.Errorf("unexpected AnyTLS Loon line: %s", anytls)
+	}
+	ss128 := byName["[JP-Tokyo] SS2022-128"].Line
+	if !strings.Contains(ss128, `= Shadowsocks, 203.0.113.10, 8388, 2022-blake3-aes-128-gcm, "SERVERKEY16BYTES======:AAAAAAAAAAAAAAAAAAAAAA==", udp=true`) {
+		t.Errorf("unexpected Shadowsocks Loon line: %s", ss128)
+	}
+	trojan := byName["[JP-Tokyo] Trojan gRPC"].Line
+	if !strings.Contains(trojan, "= Trojan, trojan-edge.example.com, 443") || !strings.Contains(trojan, "sni=trojan-sni.example.com") {
+		t.Errorf("unexpected Trojan Loon line: %s", trojan)
+	}
+	socksAuth := byName["[JP-Tokyo] Socks5 Auth"].Line
+	if !strings.Contains(socksAuth, "= SOCKS5, 203.0.113.10, 1080, alice, Al1ce#Pass!") {
+		t.Errorf("unexpected SOCKS5 Loon line: %s", socksAuth)
+	}
+	httpAuth := byName["[JP-Tokyo] HTTP Auth"].Line
+	if !strings.Contains(httpAuth, "= HTTP, 203.0.113.10, 8080, alice, Al1ce#Pass!") {
+		t.Errorf("unexpected HTTP Loon line: %s", httpAuth)
+	}
+
+	// Verify Render(...) populates RenderedNode.Loon identically
+	uriOut, err := Render(in, "uri")
+	if err != nil {
+		t.Fatalf("Render(uri) failed: %v", err)
+	}
+	if uriOut.Nodes[0].Loon != nodes[0].Line {
+		t.Errorf("Render().Nodes[0].Loon=%q != RenderLoon[0].Line=%q", uriOut.Nodes[0].Loon, nodes[0].Line)
+	}
+}

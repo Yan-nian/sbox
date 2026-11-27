@@ -984,3 +984,119 @@ func TestV102IPDetectHostFallbackAndSubStoreCoercion(t *testing.T) {
 		t.Fatalf("expected coerced Sub-Store content to be plain ss:// URI with real public IP, got:\n%s", pushedContent)
 	}
 }
+
+func TestV103InboundLinksEndpointURIAndLoon(t *testing.T) {
+	srv, st, _, _, basePath := newTestServer(t)
+	defer srv.StopAutoSync()
+	token := m5InitAdmin(t, srv, basePath)
+	ctx := context.Background()
+
+	_ = st.UpdatePanelSettings(ctx, model.PanelSettings{
+		InstanceID:  "hw-sg",
+		WebBasePath: basePath,
+		ListenPort:  18080,
+		PublicIPv4:  "188.239.22.220",
+		LogLevel:    "info",
+	})
+
+	// Create 2 enabled members + 1 disabled member.
+	m1Rec := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/members", map[string]any{"name": "alice", "enabled": true}, token)
+	var m1 model.Member
+	_ = json.Unmarshal(m1Rec.Body.Bytes(), &m1)
+
+	doJSON(t, srv, http.MethodPost, basePath+"/api/v1/members", map[string]any{"name": "bob", "enabled": true}, token)
+	doJSON(t, srv, http.MethodPost, basePath+"/api/v1/members", map[string]any{"name": "disabled-user", "enabled": false}, token)
+
+	kpRec := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/tools/reality-keypair", nil, token)
+	var kp struct {
+		PrivateKey string `json:"private_key"`
+		PublicKey  string `json:"public_key"`
+		ShortID    string `json:"short_id"`
+	}
+	_ = json.Unmarshal(kpRec.Body.Bytes(), &kp)
+
+	// VLESS Reality inbound bound to all members + 1 extra entry.
+	vlessRec := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/inbounds", map[string]any{
+		"node_id":     1,
+		"name":        "VLESS Main",
+		"tag":         "vless-main",
+		"protocol":    "vless",
+		"listen_port": 26150,
+		"settings": map[string]any{
+			"tls_mode":                 "reality",
+			"flow":                     "xtls-rprx-vision",
+			"transport":                "tcp",
+			"reality_handshake_server": "www.microsoft.com",
+			"reality_handshake_port":   443,
+			"reality_private_key":      kp.PrivateKey,
+			"reality_public_key":       kp.PublicKey,
+			"reality_short_ids":        []string{kp.ShortID},
+		},
+		"extra_entries": []map[string]any{
+			{"name": "CN Relay", "host": "relay.example.com", "port": 443},
+		},
+	}, token)
+	if vlessRec.Code != http.StatusCreated {
+		t.Fatalf("create vless inbound failed (%d): %s", vlessRec.Code, vlessRec.Body.String())
+	}
+	var vlessIb model.Inbound
+	_ = json.Unmarshal(vlessRec.Body.Bytes(), &vlessIb)
+
+	// Direct inbound (must return empty items: []).
+	dirRec := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/inbounds", map[string]any{
+		"node_id":     1,
+		"name":        "Direct Fwd",
+		"tag":         "direct-1",
+		"protocol":    "direct",
+		"listen_port": 25000,
+		"settings": map[string]any{
+			"override_address": "1.1.1.1",
+			"override_port":    53,
+		},
+	}, token)
+	var dirIb model.Inbound
+	_ = json.Unmarshal(dirRec.Body.Bytes(), &dirIb)
+
+	// 1. Fetch links for VLESS Reality -> 2 enabled members * (1 primary + 1 extra) = 4 items!
+	linksRec := doJSON(t, srv, http.MethodGet, basePath+"/api/v1/inbounds/"+strconvFormatInt(vlessIb.ID)+"/links", nil, token)
+	if linksRec.Code != http.StatusOK {
+		t.Fatalf("GET /inbounds/{id}/links failed (%d): %s", linksRec.Code, linksRec.Body.String())
+	}
+	var linksResp struct {
+		InboundID   int64             `json:"inbound_id"`
+		InboundName string            `json:"inbound_name"`
+		Protocol    string            `json:"protocol"`
+		Items       []inboundLinkItem `json:"items"`
+	}
+	_ = json.Unmarshal(linksRec.Body.Bytes(), &linksResp)
+	if linksResp.InboundID != vlessIb.ID || linksResp.InboundName != "VLESS Main" || linksResp.Protocol != "vless" || len(linksResp.Items) != 4 {
+		t.Fatalf("unexpected VLESS links response: %+v", linksResp)
+	}
+	first := linksResp.Items[0]
+	if first.MemberID != m1.ID || first.MemberName != "alice" ||
+		!strings.HasPrefix(first.URI, "vless://"+m1.UUID+"@188.239.22.220:26150?") ||
+		!strings.Contains(first.Loon, `= VLESS, 188.239.22.220, 26150, "`+m1.UUID+`"`) ||
+		!strings.Contains(first.Loon, `public-key="`+kp.PublicKey+`"`) ||
+		!strings.Contains(first.Loon, "over-tls=true, sni=www.microsoft.com, udp=true") {
+		t.Fatalf("unexpected first inbound link item: %+v", first)
+	}
+
+	// 2. Direct inbound returns 200 with empty items: []
+	dirLinksRec := doJSON(t, srv, http.MethodGet, basePath+"/api/v1/inbounds/"+strconvFormatInt(dirIb.ID)+"/links", nil, token)
+	if dirLinksRec.Code != http.StatusOK {
+		t.Fatalf("direct links failed (%d): %s", dirLinksRec.Code, dirLinksRec.Body.String())
+	}
+	var dirResp struct {
+		Items []inboundLinkItem `json:"items"`
+	}
+	_ = json.Unmarshal(dirLinksRec.Body.Bytes(), &dirResp)
+	if dirResp.Items == nil || len(dirResp.Items) != 0 {
+		t.Fatalf("expected empty items for direct inbound, got %+v", dirResp.Items)
+	}
+
+	// 3. Unknown inbound ID -> 404
+	notFoundRec := doJSON(t, srv, http.MethodGet, basePath+"/api/v1/inbounds/9999/links", nil, token)
+	if notFoundRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown inbound id, got %d", notFoundRec.Code)
+	}
+}

@@ -498,6 +498,21 @@ export interface InboundDefaultsResponse {
   settings: InboundSettings;
 }
 
+export interface InboundLinkItem {
+  member_id: number;
+  member_name: string;
+  name: string;
+  uri: string;
+  loon: string;
+}
+
+export interface InboundLinksResponse {
+  inbound_id: number;
+  inbound_name: string;
+  protocol: string;
+  items: InboundLinkItem[];
+}
+
 export interface SaveInboundRequest {
   node_id?: number;
   name: string;

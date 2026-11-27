@@ -19,6 +19,7 @@ import type {
   ExtraOutboundItem,
   InboundDefaultsResponse,
   InboundItem,
+  InboundLinksResponse,
   InboundProtocol,
   InboundsResponse,
   LoginRequest,
@@ -454,6 +455,9 @@ export const api = {
     request<{ ok?: boolean }>(`/inbounds/${id}`, {
       method: "DELETE",
     }),
+
+  getInboundLinks: (id: number) =>
+    request<InboundLinksResponse>(`/inbounds/${id}/links`),
 
   // Traffic Stats (supports node_id filter; omit or 0 for cluster-wide)
   getTrafficStats: (params: {
