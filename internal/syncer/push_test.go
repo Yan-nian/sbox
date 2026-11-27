@@ -351,8 +351,11 @@ func TestPushToTarget_GitHubRepo_CreateUpdateAnd409Retry(t *testing.T) {
 
 func TestPushToTarget_SubStore_CreateAndPatch(t *testing.T) {
 	var mu sync.Mutex
-	subs := map[string]map[string]any{}
-	var postCount, patchCount int
+	subs := map[string]map[string]any{
+		"other-existing": {"name": "other-existing", "source": "remote"},
+	}
+	var listCount, postCount, patchCount, getSingleCount int
+	var lastPatchBody map[string]any
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -365,14 +368,22 @@ func TestPushToTarget_SubStore_CreateAndPatch(t *testing.T) {
 		subPath := strings.TrimPrefix(r.URL.Path, prefix)
 
 		switch {
-		case r.Method == http.MethodGet && strings.HasPrefix(subPath, "/api/sub/"):
-			name := strings.TrimPrefix(subPath, "/api/sub/")
-			if item, ok := subs[name]; ok {
-				_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": item})
-				return
+		case r.Method == http.MethodGet && subPath == "/api/subs":
+			listCount++
+			items := make([]map[string]any, 0, len(subs))
+			for _, item := range subs {
+				items = append(items, item)
 			}
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(map[string]any{"status": "failed", "error": map[string]any{"message": "not found"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": items})
+
+		case r.Method == http.MethodGet && strings.HasPrefix(subPath, "/api/sub/"):
+			// Reproduce real Sub-Store Express backend crash on GET /api/sub/{missing} — must NEVER be called!
+			getSingleCount++
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "failed",
+				"error":  map[string]any{"message": "TypeError: Cannot convert undefined or null to object"},
+			})
 
 		case r.Method == http.MethodPost && subPath == "/api/subs":
 			postCount++
@@ -394,9 +405,17 @@ func TestPushToTarget_SubStore_CreateAndPatch(t *testing.T) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			subs[name] = body
+			lastPatchBody = body
+			existing := subs[name]
+			if existing == nil {
+				existing = map[string]any{}
+			}
+			for k, v := range body {
+				existing[k] = v
+			}
+			subs[name] = existing
 			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": body})
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": existing})
 
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -414,58 +433,115 @@ func TestPushToTarget_SubStore_CreateAndPatch(t *testing.T) {
 	plainURIs := "vless://u1@1.1.1.1:443#JP-1\nhy2://p1@1.1.1.1:8443#JP-2"
 	b64Content := base64.StdEncoding.EncodeToString([]byte(plainURIs))
 
-	// 1. Not found (404) -> POST /api/subs, decoding base64 to plain URI lines!
+	// 1. Not present in GET /api/subs -> POST /api/subs, decoding base64 to plain URI lines!
 	res1 := PushToTarget(context.Background(), cfg, b64Content, 2)
 	if !res1.Success || res1.HTTPStatus != http.StatusCreated {
 		t.Fatalf("expected sub_store create success, got %+v", res1)
 	}
-	if postCount != 1 || patchCount != 0 {
-		t.Fatalf("expected 1 POST and 0 PATCH, got POST=%d PATCH=%d", postCount, patchCount)
+	if listCount != 1 || postCount != 1 || patchCount != 0 || getSingleCount != 0 {
+		t.Fatalf("expected GET /api/subs=1, POST=1, PATCH=0, GET /api/sub/{name}=0; got list=%d post=%d patch=%d getSingle=%d", listCount, postCount, patchCount, getSingleCount)
 	}
 	wantRemote := srv.URL + "/secret-key/download/sbox-jp-tokyo-1"
 	if res1.RemoteURL != wantRemote {
 		t.Fatalf("RemoteURL=%q, want %q", res1.RemoteURL, wantRemote)
 	}
 	stored := subs["sbox-jp-tokyo-1"]
-	if stored == nil || stored["source"] != "local" || stored["content"] != plainURIs {
-		t.Fatalf("expected decoded plain URI content stored in Sub-Store, got: %#v", stored)
+	if stored == nil || stored["source"] != "local" || stored["content"] != plainURIs || stored["displayName"] != "sbox-jp-tokyo-1" {
+		t.Fatalf("expected decoded plain URI content & defaults stored in Sub-Store, got: %#v", stored)
+	}
+	if _, hasURL := stored["url"]; !hasURL {
+		t.Fatalf("expected url field on POST create payload, got: %#v", stored)
 	}
 
-	// 2. Exists (200) -> PATCH /api/sub/{name}
+	// Simulate user customizing displayName and process rules inside Sub-Store UI.
+	mu.Lock()
+	subs["sbox-jp-tokyo-1"]["displayName"] = "My Custom Nodes"
+	subs["sbox-jp-tokyo-1"]["process"] = []any{map[string]any{"type": "Flag Operator"}}
+	mu.Unlock()
+
+	// 2. Present in GET /api/subs -> PATCH /api/sub/{name} with minimal payload preserving displayName & process!
 	updatedPlain := "vless://u2@2.2.2.2:443#JP-New"
 	res2 := PushToTarget(context.Background(), cfg, base64.StdEncoding.EncodeToString([]byte(updatedPlain)), 1)
 	if !res2.Success || res2.HTTPStatus != http.StatusOK {
 		t.Fatalf("expected sub_store patch success, got %+v", res2)
 	}
-	if postCount != 1 || patchCount != 1 {
-		t.Fatalf("expected 1 POST and 1 PATCH, got POST=%d PATCH=%d", postCount, patchCount)
+	if postCount != 1 || patchCount != 1 || getSingleCount != 0 {
+		t.Fatalf("expected POST=1, PATCH=1, GET /api/sub=0; got post=%d patch=%d getSingle=%d", postCount, patchCount, getSingleCount)
 	}
-	if subs["sbox-jp-tokyo-1"]["content"] != updatedPlain {
-		t.Fatalf("expected updated content, got: %#v", subs["sbox-jp-tokyo-1"])
+	if _, sentDisplay := lastPatchBody["displayName"]; sentDisplay {
+		t.Fatalf("PATCH must NOT overwrite displayName, got payload: %#v", lastPatchBody)
+	}
+	if _, sentProcess := lastPatchBody["process"]; sentProcess {
+		t.Fatalf("PATCH must NOT overwrite process rules, got payload: %#v", lastPatchBody)
+	}
+	if subs["sbox-jp-tokyo-1"]["content"] != updatedPlain || subs["sbox-jp-tokyo-1"]["displayName"] != "My Custom Nodes" {
+		t.Fatalf("expected updated content while preserving displayName, got: %#v", subs["sbox-jp-tokyo-1"])
+	}
+	if procs, ok := subs["sbox-jp-tokyo-1"]["process"].([]any); !ok || len(procs) != 1 {
+		t.Fatalf("expected user process rules preserved after PATCH, got: %#v", subs["sbox-jp-tokyo-1"]["process"])
 	}
 
-	// 3. Verify 200 with explicit {"status":"success","data":null} is treated as not found -> POST create.
+	// 3. Verify accidental trailing `/api`, `/api/`, `/api/sub`, and `/api/subs` URL normalization!
+	for _, suffix := range []string{"/api", "/api/", "/api/sub", "/api/subs", "/api/subs/"} {
+		cfgNorm := cfg
+		cfgNorm.SubStoreURL = srv.URL + "/secret-key" + suffix
+		resNorm := PushToTarget(context.Background(), cfgNorm, base64.StdEncoding.EncodeToString([]byte(updatedPlain)), 1)
+		if !resNorm.Success {
+			t.Fatalf("expected success with trailing %q, got %+v", suffix, resNorm)
+		}
+		if resNorm.RemoteURL != wantRemote {
+			t.Fatalf("suffix %q produced RemoteURL=%q, want %q", suffix, resNorm.RemoteURL, wantRemote)
+		}
+	}
+
+	// 4. Verify direct JSON array response and data:null on GET /api/subs both work cleanly.
+	arraySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/subs":
+			_, _ = w.Write([]byte(`[{"name":"another"}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/subs":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"status":"success"}`))
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer arraySrv.Close()
+
+	resArr := PushToTarget(context.Background(), PushTargetConfig{
+		Type:         "sub_store",
+		Format:       "uri",
+		SubStoreURL:  arraySrv.URL + "/api/subs",
+		SubStoreName: "custom-sub",
+	}, updatedPlain, 1)
+	if !resArr.Success || resArr.HTTPStatus != http.StatusCreated {
+		t.Fatalf("expected POST create when GET /api/subs returns array without target, got %+v", resArr)
+	}
+	if resArr.RemoteURL != arraySrv.URL+"/download/custom-sub" {
+		t.Fatalf("unexpected normalized RemoteURL: %q", resArr.RemoteURL)
+	}
+
 	nullSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet:
+		case r.Method == http.MethodGet && r.URL.Path == "/api/subs":
 			_, _ = w.Write([]byte(`{"status":"success","data":null}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/subs":
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"status":"success"}`))
 		default:
-			w.WriteHeader(http.StatusMethodNotAllowed)
+			w.WriteHeader(http.StatusInternalServerError)
 		}
 	}))
 	defer nullSrv.Close()
 
-	res3 := PushToTarget(context.Background(), PushTargetConfig{
+	resNull := PushToTarget(context.Background(), PushTargetConfig{
 		Type:         "sub_store",
 		Format:       "uri",
 		SubStoreURL:  nullSrv.URL,
 		SubStoreName: "custom-sub",
 	}, updatedPlain, 1)
-	if !res3.Success || res3.HTTPStatus != http.StatusCreated {
-		t.Fatalf("expected POST create when GET returns data:null, got %+v", res3)
+	if !resNull.Success || resNull.HTTPStatus != http.StatusCreated {
+		t.Fatalf("expected POST create when GET /api/subs returns data:null, got %+v", resNull)
 	}
 }
 

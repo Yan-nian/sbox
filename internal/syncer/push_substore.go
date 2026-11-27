@@ -21,8 +21,29 @@ type subStoreAPIResponse struct {
 	} `json:"error"`
 }
 
+type subStoreListItem struct {
+	Name string `json:"name"`
+}
+
+// normalizeSubStoreBaseURL trims trailing slashes and strips accidental trailing
+// `/api/subs`, `/api/sub`, or `/api` suffixes from a user-supplied Sub-Store URL.
+func normalizeSubStoreBaseURL(raw string) string {
+	base := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if base == "" {
+		return ""
+	}
+	lower := strings.ToLower(base)
+	for _, suffix := range []string{"/api/subs", "/api/sub", "/api"} {
+		if strings.HasSuffix(lower, suffix) {
+			base = strings.TrimRight(base[:len(base)-len(suffix)], "/")
+			break
+		}
+	}
+	return base
+}
+
 func pushSubStore(ctx context.Context, cfg PushTargetConfig, content string, nodeCount int) PushResult {
-	baseURL := strings.TrimRight(strings.TrimSpace(cfg.SubStoreURL), "/")
+	baseURL := normalizeSubStoreBaseURL(cfg.SubStoreURL)
 	if baseURL == "" {
 		return PushResult{Success: false, NodeCount: nodeCount, Message: "sub_store requires sub_store_url"}
 	}
@@ -52,50 +73,62 @@ func pushSubStore(ctx context.Context, cfg PushTargetConfig, content string, nod
 	}
 
 	escapedName := url.PathEscape(name)
+	subsURL := fmt.Sprintf("%s/api/subs", baseURL)
 	singleSubURL := fmt.Sprintf("%s/api/sub/%s", baseURL, escapedName)
-	createSubURL := fmt.Sprintf("%s/api/subs", baseURL)
 
-	// Step 1: Probe whether the subscription already exists in Sub-Store.
-	checkStatus, checkBody, checkErr := doSubStoreRequest(ctx, client, http.MethodGet, singleSubURL, nil)
-	if checkErr != nil {
-		return PushResult{Success: false, HTTPStatus: checkStatus, NodeCount: nodeCount, Message: fmt.Sprintf("check sub-store subscription: %v", checkErr)}
+	// Step 1: Probe existence via GET /api/subs (real Sub-Store throws HTTP 500 on GET /api/sub/{missing}).
+	listStatus, listBody, listErr := doSubStoreRequest(ctx, client, http.MethodGet, subsURL, nil)
+	if listErr != nil {
+		return PushResult{Success: false, HTTPStatus: listStatus, NodeCount: nodeCount, Message: fmt.Sprintf("list sub-store subscriptions: %v", listErr)}
 	}
-
-	var exists bool
-	switch {
-	case checkStatus == http.StatusNotFound:
-		exists = false
-	case checkStatus >= 200 && checkStatus < 300:
-		exists = subStoreCheckExists(checkBody)
-	default:
+	if listStatus < 200 || listStatus >= 300 {
 		return PushResult{
 			Success:    false,
-			HTTPStatus: checkStatus,
+			HTTPStatus: listStatus,
 			NodeCount:  nodeCount,
-			Message:    formatSubStoreError("check sub-store subscription", checkStatus, checkBody),
+			Message:    formatSubStoreError("list sub-store subscriptions", listStatus, listBody),
 		}
 	}
 
-	// Step 2: PATCH existing subscription or POST new subscription.
-	payload := map[string]any{
-		"name":        name,
-		"displayName": name,
-		"source":      "local",
-		"content":     plainContent,
-		"process":     []any{},
-	}
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return PushResult{Success: false, NodeCount: nodeCount, Message: fmt.Sprintf("marshal sub-store payload: %v", err)}
+	exists, parseErr := subStoreListContains(listBody, name)
+	if parseErr != nil {
+		return PushResult{
+			Success:    false,
+			HTTPStatus: listStatus,
+			NodeCount:  nodeCount,
+			Message:    formatSubStoreError("list sub-store subscriptions", listStatus, listBody),
+		}
 	}
 
+	// Step 2: PATCH existing subscription with minimal payload (preserving displayName/icon/tag/process)
+	// or POST new subscription with full defaults.
+	var payload map[string]any
 	method := http.MethodPost
-	targetURL := createSubURL
+	targetURL := subsURL
 	action := "create sub-store subscription"
 	if exists {
 		method = http.MethodPatch
 		targetURL = singleSubURL
 		action = "update sub-store subscription"
+		payload = map[string]any{
+			"name":    name,
+			"source":  "local",
+			"content": plainContent,
+		}
+	} else {
+		payload = map[string]any{
+			"name":        name,
+			"displayName": name,
+			"source":      "local",
+			"url":         "",
+			"content":     plainContent,
+			"process":     []any{},
+		}
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return PushResult{Success: false, NodeCount: nodeCount, Message: fmt.Sprintf("marshal sub-store payload: %v", err)}
 	}
 
 	writeStatus, writeBody, writeErr := doSubStoreRequest(ctx, client, method, targetURL, payloadBytes)
@@ -138,32 +171,49 @@ func pushSubStore(ctx context.Context, cfg PushTargetConfig, content string, nod
 	}
 }
 
-func subStoreCheckExists(body []byte) bool {
+func subStoreListContains(body []byte, targetName string) (bool, error) {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
-		return false
+		return false, nil
 	}
+
+	// Support direct JSON array responses: [ { "name": "..." }, ... ]
+	if trimmed[0] == '[' {
+		var items []subStoreListItem
+		if err := json.Unmarshal(trimmed, &items); err != nil {
+			return false, err
+		}
+		for _, item := range items {
+			if item.Name == targetName {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+
+	// Standard Sub-Store envelope: { "status": "success", "data": [ { "name": "..." }, ... ] }
 	var doc subStoreAPIResponse
 	if err := json.Unmarshal(trimmed, &doc); err != nil {
-		return false
+		return false, err
 	}
 	st := strings.ToLower(strings.TrimSpace(doc.Status))
 	if st == "failed" || st == "error" {
-		return false
+		return false, fmt.Errorf("sub-store returned status %q", doc.Status)
 	}
 	dataTrimmed := bytes.TrimSpace(doc.Data)
-	if bytes.Equal(dataTrimmed, []byte("null")) {
-		return false
+	if len(dataTrimmed) == 0 || bytes.Equal(dataTrimmed, []byte("null")) {
+		return false, nil
 	}
-	if st == "success" {
-		return true
+	var items []subStoreListItem
+	if err := json.Unmarshal(dataTrimmed, &items); err != nil {
+		return false, err
 	}
-	if len(dataTrimmed) > 0 &&
-		!bytes.Equal(dataTrimmed, []byte("{}")) &&
-		!bytes.Equal(dataTrimmed, []byte(`""`)) {
-		return true
+	for _, item := range items {
+		if item.Name == targetName {
+			return true, nil
+		}
 	}
-	return false
+	return false, nil
 }
 
 func doSubStoreRequest(ctx context.Context, client *http.Client, method, targetURL string, body []byte) (int, []byte, error) {

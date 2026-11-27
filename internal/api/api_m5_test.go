@@ -406,16 +406,20 @@ func TestMilestone5SyncTargetsPushMergeHistoryAndDebouncedAutoSync(t *testing.T)
 					},
 				},
 			})
-		case strings.HasPrefix(r.URL.Path, "/substore/api/sub/") && r.Method == http.MethodGet:
+		case r.URL.Path == "/substore/api/subs" && r.Method == http.MethodGet:
 			mockMu.Lock()
 			exists := subStoreExists
 			mockMu.Unlock()
-			if !exists {
-				w.WriteHeader(http.StatusNotFound)
-				return
+			items := make([]map[string]any, 0, 1)
+			if exists {
+				items = append(items, map[string]any{"name": "sbox-sg"})
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"name": "sbox-sg"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": items})
+		case strings.HasPrefix(r.URL.Path, "/substore/api/sub/") && r.Method == http.MethodGet:
+			// Simulate real Sub-Store HTTP 500 crash if GET /api/sub/{name} is ever called.
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "failed", "error": map[string]any{"message": "TypeError: Cannot convert undefined or null to object"}})
 		case r.URL.Path == "/substore/api/subs" && r.Method == http.MethodPost:
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
