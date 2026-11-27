@@ -103,6 +103,14 @@ type localProxySettings struct {
 	AuthEnabled bool `json:"auth_enabled"`
 }
 
+type snellSettings struct {
+	Version  int    `json:"version"`
+	PSK      string `json:"psk"`
+	ObfsMode string `json:"obfs_mode"`
+	ObfsHost string `json:"obfs_host"` // client-side only
+	UDP      *bool  `json:"udp"`       // client-side only
+}
+
 // CompileInbound validates spec and compiles it into one (or two for shadowtls)
 // modern sing-box 1.12+ inbound JSON objects.
 func CompileInbound(spec InboundSpec) ([]json.RawMessage, error) {
@@ -141,6 +149,8 @@ func CompileInbound(spec InboundSpec) ([]json.RawMessage, error) {
 		objs, err = compileTrojan(spec)
 	case "shadowtls":
 		objs, err = compileShadowTLS(spec)
+	case "snell":
+		objs, err = compileSnell(spec)
 	case "direct":
 		objs, err = compileDirect(spec)
 	case "mixed", "socks", "http":
@@ -707,6 +717,42 @@ func compileShadowTLS(spec InboundSpec) ([]map[string]any, error) {
 	}
 
 	return []map[string]any{outer, inner}, nil
+}
+
+func compileSnell(spec InboundSpec) ([]map[string]any, error) {
+	var s snellSettings
+	if err := decodeSettings(spec.Tag, spec.Settings, &s); err != nil {
+		return nil, err
+	}
+	psk := strings.TrimSpace(s.PSK)
+	if psk == "" {
+		return nil, fmt.Errorf("configgen: inbound %q snell requires psk", spec.Tag)
+	}
+	if s.Version != 0 && s.Version != 4 && s.Version != 5 {
+		return nil, fmt.Errorf("configgen: inbound %q unsupported snell version %d (supported: 4 or 5)", spec.Tag, s.Version)
+	}
+	obfsMode := strings.ToLower(strings.TrimSpace(s.ObfsMode))
+	switch obfsMode {
+	case "", "none":
+		obfsMode = "none"
+	case "http":
+		obfsMode = "http"
+	default:
+		return nil, fmt.Errorf("configgen: inbound %q unsupported snell obfs_mode %q (supported: none, http)", spec.Tag, s.ObfsMode)
+	}
+
+	// Emit native sing-box 1.14+ snell inbound (version 5 wire protocol is compatible with v4/v5 clients;
+	// client-only fields like obfs_host and udp are intentionally excluded from server config).
+	ib := map[string]any{
+		"type":        "snell",
+		"tag":         spec.Tag,
+		"listen":      spec.Listen,
+		"listen_port": spec.ListenPort,
+		"version":     5,
+		"psk":         psk,
+		"obfs_mode":   obfsMode,
+	}
+	return []map[string]any{ib}, nil
 }
 
 func compileDirect(spec InboundSpec) ([]map[string]any, error) {

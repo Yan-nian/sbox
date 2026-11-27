@@ -396,6 +396,7 @@ export type InboundProtocol =
   | "shadowsocks"
   | "trojan"
   | "shadowtls"
+  | "snell"
   | "direct"
   | "mixed"
   | "socks"
@@ -454,6 +455,13 @@ export interface InboundSettings {
   detour_port?: number;
   ss_method?: string;
   ss_server_password?: string;
+
+  // Snell
+  version?: number;
+  psk?: string;
+  obfs_mode?: "none" | "http";
+  obfs_host?: string;
+  udp?: boolean;
 
   // Direct
   override_address?: string;

@@ -71,6 +71,12 @@ function describeSecurity(ib: InboundItem, certMap: Map<number, CertificateItem>
   if (ib.protocol === "shadowsocks") {
     return String(s.method || "ss-2022");
   }
+  if (ib.protocol === "snell") {
+    const ver = Number(s.version) === 4 ? 4 : 5;
+    const obfs =
+      s.obfs_mode === "http" ? ` · HTTP (${s.obfs_host || "www.bing.com"})` : " · 无混淆";
+    return `Snell v${ver}${obfs}${s.udp === false ? "" : " · UDP"}`;
+  }
   if (ib.protocol === "direct") {
     return `转发 → ${s.override_address || "-"}:${s.override_port || "-"}`;
   }
@@ -362,7 +368,7 @@ export function InboundsPage({ onNavigate }: { onNavigate?: (route: AppRoute) =>
 
       <Panel
         title="多协议入站节点栈"
-        description="支持 VLESS Reality/Vision、Hysteria2、TUIC v5、AnyTLS、SS-2022、Trojan、ShadowTLS v3 与端口转发"
+        description="支持 VLESS Reality/Vision、Hysteria2、TUIC v5、AnyTLS、Snell v5、SS-2022、Trojan、ShadowTLS v3 与端口转发"
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <Button

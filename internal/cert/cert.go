@@ -54,7 +54,7 @@ func GenerateSelfSigned(opts SelfSignedOptions) (*CertInfo, error) {
 
 	domains := normalizeDomains(opts.Domains)
 	if len(domains) == 0 {
-		domains = []string{"localhost"}
+		domains = []string{"www.bing.com"}
 	}
 
 	validDays := opts.ValidDays

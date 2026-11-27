@@ -143,6 +143,14 @@ type localProxySettings struct {
 	AuthEnabled bool `json:"auth_enabled"`
 }
 
+type snellSettings struct {
+	Version  int    `json:"version"`
+	PSK      string `json:"psk"`
+	ObfsMode string `json:"obfs_mode"`
+	ObfsHost string `json:"obfs_host"`
+	UDP      *bool  `json:"udp"`
+}
+
 // resolvedNode is the normalized, expanded internal representation of a single proxy node.
 type resolvedNode struct {
 	Name            string
@@ -163,6 +171,7 @@ type resolvedNode struct {
 	ss        shadowsocksSettings
 	trojan    trojanSettings
 	shadowtls shadowtlsSettings
+	snell     snellSettings
 	local     localProxySettings
 }
 
@@ -453,6 +462,21 @@ func parseProtocolSettings(rn *resolvedNode, ib InboundEntry) error {
 		if rn.shadowtls.SSMethod == "" {
 			rn.shadowtls.SSMethod = "2022-blake3-aes-128-gcm"
 		}
+	case "snell":
+		if err := decodeJSON(ib.Settings, &rn.snell); err != nil {
+			return fmt.Errorf("subgen: inbound %q snell settings: %w", ib.Tag, err)
+		}
+		if rn.snell.Version != 4 && rn.snell.Version != 5 {
+			rn.snell.Version = 5
+		}
+		rn.snell.ObfsMode = strings.ToLower(strings.TrimSpace(rn.snell.ObfsMode))
+		if rn.snell.ObfsMode != "http" {
+			rn.snell.ObfsMode = "none"
+		}
+		if rn.snell.UDP == nil {
+			t := true
+			rn.snell.UDP = &t
+		}
 	case "socks", "http", "mixed":
 		if err := decodeJSON(ib.Settings, &rn.local); err != nil {
 			return fmt.Errorf("subgen: inbound %q %s settings: %w", ib.Tag, rn.Protocol, err)
@@ -501,12 +525,38 @@ func firstNonWildcardDomain(domains []string) string {
 	return ""
 }
 
+func firstPublicCertDomain(domains []string) string {
+	for _, d := range domains {
+		d = strings.TrimSpace(d)
+		if d == "" || strings.HasPrefix(d, "*.") {
+			continue
+		}
+		lower := strings.ToLower(d)
+		if lower == "localhost" || strings.HasSuffix(lower, ".local") ||
+			strings.HasSuffix(lower, ".localhost") || strings.HasSuffix(lower, ".internal") {
+			continue
+		}
+		if ip := net.ParseIP(d); ip != nil {
+			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+				continue
+			}
+			return d
+		}
+		if !strings.Contains(d, ".") {
+			continue
+		}
+		return d
+	}
+	return ""
+}
+
 func resolveHost(ib InboundEntry, node NodeEndpoint, rn resolvedNode) string {
 	if h := strings.TrimSpace(ib.ExternalHost); h != "" {
 		return h
 	}
-	if isTLSProtocol(rn) {
-		if d := firstNonWildcardDomain(ib.CertDomains); d != "" {
+	// Never use a self-signed certificate's CN/SAN (e.g. "localhost" or "www.bing.com") as server address!
+	if isTLSProtocol(rn) && !ib.CertSelfSigned {
+		if d := firstPublicCertDomain(ib.CertDomains); d != "" {
 			return d
 		}
 	}

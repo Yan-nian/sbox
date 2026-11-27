@@ -96,8 +96,8 @@ func TestGenerateSelfSignedDefaultsAndRegenerate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateSelfSigned default failed: %v", err)
 	}
-	if !slices.Equal(first.Domains, []string{"localhost"}) {
-		t.Fatalf("expected fallback domain [localhost], got %v", first.Domains)
+	if !slices.Equal(first.Domains, []string{"www.bing.com"}) {
+		t.Fatalf("expected fallback domain [www.bing.com], got %v", first.Domains)
 	}
 	if first.NotAfter.Sub(time.Now().UTC()) < 3648*24*time.Hour {
 		t.Fatalf("expected ~3650 day default validity, got NotAfter=%v", first.NotAfter)

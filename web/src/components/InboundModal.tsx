@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -47,6 +47,7 @@ export const PROTOCOL_OPTIONS: {
   { id: "shadowsocks", label: "SS-2022", desc: "EIH 单端口多成员", badgeTone: "warn" },
   { id: "trojan", label: "Trojan", desc: "标准 TLS / WS / gRPC", badgeTone: "ok" },
   { id: "shadowtls", label: "ShadowTLS v3", desc: "TLS 伪装 + 联动 Detour", badgeTone: "uplink" },
+  { id: "snell", label: "Snell v5", desc: "原生 sing-box 1.14+ · 适配 Loon / Surge", badgeTone: "ok" },
   { id: "direct", label: "Direct", desc: "TCP/UDP 端口中转", badgeTone: "neutral" },
   { id: "mixed", label: "Mixed", desc: "HTTP + SOCKS5 混合", badgeTone: "neutral" },
   { id: "socks", label: "SOCKS5", desc: "本地/代理 SOCKS5", badgeTone: "neutral" },
@@ -61,6 +62,29 @@ function requiresCert(protocol: InboundProtocol, settings: InboundSettings): boo
     return true;
   }
   return false;
+}
+
+function generateSnellPsk(length = 31): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const out: string[] = [];
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const buf = new Uint8Array(length);
+    crypto.getRandomValues(buf);
+    for (let i = 0; i < length; i += 1) {
+      out.push(alphabet[buf[i] % alphabet.length]);
+    }
+    return out.join("");
+  }
+  for (let i = 0; i < length; i += 1) {
+    out.push(alphabet[Math.floor(Math.random() * alphabet.length)]);
+  }
+  return out.join("");
+}
+
+function defaultInboundName(proto: InboundProtocol): string {
+  if (proto === "vless") return "VLESS Reality";
+  const meta = PROTOCOL_OPTIONS.find((p) => p.id === proto);
+  return meta ? `${meta.label} 节点` : proto;
 }
 
 interface InboundModalProps {
@@ -107,37 +131,65 @@ export function InboundModal({
   const [keygenBusy, setKeygenBusy] = useState(false);
   const [probing, setProbing] = useState(false);
   const [probeResult, setProbeResult] = useState<RealityProbeResult | null>(null);
+  const nameManuallyEditedRef = useRef(false);
+  const tagManuallyEditedRef = useRef(false);
+  const defaultsReqSeqRef = useRef(0);
 
   const loadProtocolDefaults = useCallback(
-    async (proto: InboundProtocol) => {
+    async (proto: InboundProtocol, prevProto?: InboundProtocol) => {
+      const reqSeq = ++defaultsReqSeqRef.current;
       setLoadingDefaults(true);
       setProbeResult(null);
+      // Immediately clear previous protocol settings so stale keys never survive switches
+      setSettings({});
       try {
         const def = await api.getInboundDefaults(proto);
-        setTag(def.tag || `${proto}-in`);
+        if (reqSeq !== defaultsReqSeqRef.current) return;
+        const freshTag = def.tag || `${proto}-in`;
+        setTag((curr) => {
+          if (
+            !tagManuallyEditedRef.current ||
+            !curr.trim() ||
+            (prevProto && curr.trim().toLowerCase().startsWith(`${prevProto}-`))
+          ) {
+            return freshTag;
+          }
+          return curr;
+        });
         setListen(def.listen || "::");
         setListenPort(def.listen_port ? String(def.listen_port) : "24443");
-        setSettings(def.settings || {});
-        if (!name.trim()) {
-          const meta = PROTOCOL_OPTIONS.find((p) => p.id === proto);
-          setName(meta ? `${meta.label} 节点` : proto);
-        }
+        setSettings({ ...(def.settings || {}) });
+        setName((curr) => {
+          if (
+            !nameManuallyEditedRef.current ||
+            !curr.trim() ||
+            (prevProto && curr.trim().toLowerCase().startsWith(`${prevProto}-`))
+          ) {
+            return defaultInboundName(proto);
+          }
+          return curr;
+        });
       } catch (err) {
+        if (reqSeq !== defaultsReqSeqRef.current) return;
         toast.error(
           "拉取协议默认参数失败",
           err instanceof ApiError ? err.message : undefined,
         );
       } finally {
-        setLoadingDefaults(false);
+        if (reqSeq === defaultsReqSeqRef.current) {
+          setLoadingDefaults(false);
+        }
       }
     },
-    [name, toast],
+    [toast],
   );
 
   useEffect(() => {
     if (!open) return;
     setProbeResult(null);
     if (editing) {
+      nameManuallyEditedRef.current = true;
+      tagManuallyEditedRef.current = true;
       setProtocol(editing.protocol);
       setName(editing.name);
       setTag(editing.tag);
@@ -152,8 +204,11 @@ export function InboundModal({
       setExternalPort(editing.external_port ? String(editing.external_port) : "");
       setExtraEntries(Array.isArray(editing.extra_entries) ? editing.extra_entries : []);
     } else {
+      nameManuallyEditedRef.current = false;
+      tagManuallyEditedRef.current = false;
       setProtocol("vless");
-      setName("VLESS Reality");
+      setName(defaultInboundName("vless"));
+      setTag("vless-in");
       setEnabled(true);
       setCertificateId(certificates[0] ? String(certificates[0].id) : "");
       setMemberMode("all");
@@ -168,10 +223,25 @@ export function InboundModal({
 
   const handleSelectProtocol = (next: InboundProtocol) => {
     if (editing || next === protocol) return;
+    const prevProto = protocol;
     setProtocol(next);
-    const meta = PROTOCOL_OPTIONS.find((p) => p.id === next);
-    setName(meta ? `${meta.label} 节点` : next);
-    void loadProtocolDefaults(next);
+    if (
+      !nameManuallyEditedRef.current ||
+      !name.trim() ||
+      name.trim().toLowerCase().startsWith(`${prevProto}-`)
+    ) {
+      setName(defaultInboundName(next));
+      nameManuallyEditedRef.current = false;
+    }
+    if (
+      !tagManuallyEditedRef.current ||
+      !tag.trim() ||
+      tag.trim().toLowerCase().startsWith(`${prevProto}-`)
+    ) {
+      setTag(`${next}-in`);
+      tagManuallyEditedRef.current = false;
+    }
+    void loadProtocolDefaults(next, prevProto);
   };
 
   const patchSettings = (patch: Partial<InboundSettings>) => {
@@ -270,8 +340,8 @@ export function InboundModal({
 
     const extPortNum = externalPort.trim() ? Number.parseInt(externalPort, 10) : 0;
 
-    // Normalize flow for VLESS (only allowed when transport is tcp or empty)
-    const finalSettings: InboundSettings = { ...settings };
+    // Normalize protocol settings before submission
+    let finalSettings: InboundSettings = { ...settings };
     if (protocol === "vless") {
       const tr = finalSettings.transport || "tcp";
       if (tr !== "tcp") {
@@ -280,6 +350,22 @@ export function InboundModal({
       if (finalSettings.tls_mode === "reality" && !finalSettings.server_name && finalSettings.reality_handshake_server) {
         finalSettings.server_name = finalSettings.reality_handshake_server;
       }
+    } else if (protocol === "snell") {
+      const psk = String(finalSettings.psk || "").trim();
+      if (!psk) {
+        toast.error("请输入或随机生成 Snell 预共享密钥 (PSK)");
+        return;
+      }
+      const obfsMode = finalSettings.obfs_mode === "http" ? "http" : "none";
+      finalSettings = {
+        version: Number(finalSettings.version) === 4 ? 4 : 5,
+        psk,
+        obfs_mode: obfsMode,
+        ...(obfsMode === "http"
+          ? { obfs_host: String(finalSettings.obfs_host || "").trim() || "www.bing.com" }
+          : {}),
+        udp: finalSettings.udp !== false,
+      };
     }
 
     const payload: SaveInboundRequest = {
@@ -401,7 +487,10 @@ export function InboundModal({
             <Input
               id="in-name"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                nameManuallyEditedRef.current = true;
+                setName(e.target.value);
+              }}
               placeholder="JP VLESS Reality"
               required
             />
@@ -410,7 +499,10 @@ export function InboundModal({
             <Input
               id="in-tag"
               value={tag}
-              onChange={(e) => setTag(e.target.value)}
+              onChange={(e) => {
+                tagManuallyEditedRef.current = true;
+                setTag(e.target.value);
+              }}
               placeholder="vless-in"
               className="font-mono"
             />
@@ -1059,6 +1151,94 @@ export function InboundModal({
                   label="启用 ShadowTLS 严格模式"
                 />
                 <span>启用严格 TLS 1.3 验证模式 (strict_mode)</span>
+              </label>
+            </div>
+          )}
+
+          {/* Snell v5 */}
+          {protocol === "snell" && (
+            <div className="space-y-3.5">
+              <div className="grid gap-3.5 sm:grid-cols-2">
+                <Field label="协议版本 (version)" htmlFor="snell-ver">
+                  <Select
+                    id="snell-ver"
+                    value={String(Number(settings.version) === 4 ? 4 : 5)}
+                    onChange={(e) =>
+                      patchSettings({ version: Number.parseInt(e.target.value, 10) === 4 ? 4 : 5 })
+                    }
+                  >
+                    <option value="5">5 (推荐，兼容 v4/v5)</option>
+                    <option value="4">4</option>
+                  </Select>
+                </Field>
+                <Field label="混淆模式 (obfs_mode)" htmlFor="snell-obfs">
+                  <Select
+                    id="snell-obfs"
+                    value={settings.obfs_mode === "http" ? "http" : "none"}
+                    onChange={(e) => {
+                      const nextMode = e.target.value === "http" ? "http" : "none";
+                      patchSettings({
+                        obfs_mode: nextMode,
+                        ...(nextMode === "http" && !settings.obfs_host
+                          ? { obfs_host: "www.bing.com" }
+                          : {}),
+                      });
+                    }}
+                  >
+                    <option value="none">无混淆 (none)</option>
+                    <option value="http">HTTP 混淆 (http)</option>
+                  </Select>
+                </Field>
+              </div>
+
+              <Field
+                label="预共享密钥 (psk)"
+                htmlFor="snell-psk"
+                hint="推荐使用 31 位随机字母数字密钥，适配 Loon / Surge / sing-box 1.14+"
+              >
+                <div className="flex gap-2">
+                  <Input
+                    id="snell-psk"
+                    value={settings.psk || ""}
+                    onChange={(e) => patchSettings({ psk: e.target.value })}
+                    placeholder="点击右侧随机生成 31 位 PSK"
+                    className="flex-1 font-mono text-xs"
+                    required
+                  />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="md"
+                    onClick={() => {
+                      patchSettings({ psk: generateSnellPsk(31) });
+                      toast.success("已随机生成 31 位 Snell PSK");
+                    }}
+                  >
+                    <KeyRound className="h-3.5 w-3.5" />
+                    随机生成 PSK
+                  </Button>
+                </div>
+              </Field>
+
+              {settings.obfs_mode === "http" && (
+                <Field label="HTTP 混淆 Host (obfs_host)" htmlFor="snell-obfs-host">
+                  <Input
+                    id="snell-obfs-host"
+                    value={settings.obfs_host ?? "www.bing.com"}
+                    onChange={(e) => patchSettings({ obfs_host: e.target.value })}
+                    placeholder="www.bing.com"
+                    className="font-mono text-xs"
+                  />
+                </Field>
+              )}
+
+              <label className="flex items-center gap-2.5 text-xs text-ink-secondary">
+                <Switch
+                  checked={settings.udp !== false}
+                  onChange={(v) => patchSettings({ udp: v })}
+                  label="客户端启用 UDP"
+                />
+                <span>客户端启用 UDP 转发 (udp=true，写入 Loon / Surge / Clash 订阅)</span>
               </label>
             </div>
           )}

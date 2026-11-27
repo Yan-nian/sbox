@@ -339,15 +339,18 @@ func TestRenderAllProtocolsAndFormats(t *testing.T) {
 		t.Errorf("URI fragment must encode spaces as %%20, not '+': %s", vlessReality.URI)
 	}
 
-	// Check Hysteria2 primary + extra entries
+	// Check Hysteria2 primary + extra entries (self-signed cert -> host must be node IP, NOT cert domain; no pinSHA256)
 	hy2Primary := nodeByName["[JP-Tokyo] Hysteria2"]
-	if !strings.Contains(hy2Primary.URI, "@hy2.example.com:4430/") {
-		t.Errorf("expected Hy2 primary host resolved to non-wildcard cert domain hy2.example.com, got: %s", hy2Primary.URI)
+	if !strings.Contains(hy2Primary.URI, "@203.0.113.10:4430/") {
+		t.Errorf("expected self-signed Hy2 primary host resolved to node IP 203.0.113.10, got: %s", hy2Primary.URI)
 	}
-	for _, want := range []string{"obfs=salamander", "obfs-password=salamander-secret", "mport=20000-40000", "insecure=1"} {
+	for _, want := range []string{"obfs=salamander", "obfs-password=salamander-secret", "mport=20000-40000", "sni=hy2.example.com", "insecure=1"} {
 		if !strings.Contains(hy2Primary.URI, want) {
 			t.Errorf("Hysteria2 URI missing %q: %s", want, hy2Primary.URI)
 		}
+	}
+	if strings.Contains(hy2Primary.URI, "pinSHA256") {
+		t.Errorf("Hysteria2 URI must NOT emit pinSHA256: %s", hy2Primary.URI)
 	}
 	hy2Extra1, ok := nodeByName["[JP-Tokyo] Hysteria2 - GZ Relay"]
 	if !ok || !strings.Contains(hy2Extra1.URI, "@198.51.100.5:24430/") {
@@ -533,8 +536,13 @@ func TestRenderAllProtocolsAndFormats(t *testing.T) {
 	for _, p := range clashDoc.Proxies {
 		clashByName[p["name"].(string)] = p
 	}
-	if p := clashByName["[JP-Tokyo] Hysteria2"]; p["ports"] != "20000-40000" || p["obfs"] != "salamander" {
+	if p := clashByName["[JP-Tokyo] Hysteria2"]; p["server"] != "203.0.113.10" || p["sni"] != "hy2.example.com" || p["ports"] != "20000-40000" || p["obfs"] != "salamander" {
 		t.Errorf("unexpected clash Hysteria2 proxy: %+v", p)
+	} else if _, hasFP := p["fingerprint"]; hasFP {
+		t.Errorf("clash Hysteria2 proxy must NOT emit fingerprint: %+v", p)
+	}
+	if p := clashByName["[JP-Tokyo] AnyTLS"]; p["client-fingerprint"] != "chrome" {
+		t.Errorf("expected clash AnyTLS client-fingerprint=chrome, got: %+v", p)
 	}
 	if p := clashByName["[JP-Tokyo] ShadowTLS SS"]; p["plugin"] != "shadow-tls" {
 		t.Errorf("unexpected clash ShadowTLS proxy: %+v", p)
@@ -619,17 +627,17 @@ func TestRenderLoonAllProtocols(t *testing.T) {
 		t.Errorf("VLESS Reality Loon mismatch:\n got: %s\nwant: %s", vlessReality, wantVLESS)
 	}
 
-	// Verify VLESS WS + self-signed TLS
+	// Verify VLESS WS + self-signed TLS (host must be node IP 203.0.113.10, NOT self-signed cert domain)
 	vlessWS := byName["[JP-Tokyo] VLESS WS"].Line
-	for _, sub := range []string{"= VLESS, ws.jp.example.com, 8443", "transport=ws", "path=/chat", "host=cdn.example.com", "over-tls=true", "skip-cert-verify=true", "udp=true"} {
+	for _, sub := range []string{"= VLESS, 203.0.113.10, 8443", "transport=ws", "path=/chat", "host=cdn.example.com", "over-tls=true", "skip-cert-verify=true", "udp=true"} {
 		if !strings.Contains(vlessWS, sub) {
 			t.Errorf("VLESS WS Loon missing %q: %s", sub, vlessWS)
 		}
 	}
 
-	// Verify Hysteria2 with salamander obfs & self-signed cert
+	// Verify Hysteria2 with salamander obfs, self-signed cert & server-ports
 	hy2 := byName["[JP-Tokyo] Hysteria2"].Line
-	for _, sub := range []string{"= Hysteria2, hy2.example.com, 4430", `salamander-password="salamander-secret"`, "sni=hy2.example.com", "skip-cert-verify=true", "udp=true"} {
+	for _, sub := range []string{"= Hysteria2, 203.0.113.10, 4430", `salamander-password="salamander-secret"`, "sni=hy2.example.com", `server-ports="20000:40000"`, "skip-cert-verify=true", "udp=true"} {
 		if !strings.Contains(hy2, sub) {
 			t.Errorf("Hysteria2 Loon missing %q: %s", sub, hy2)
 		}
@@ -668,5 +676,210 @@ func TestRenderLoonAllProtocols(t *testing.T) {
 	}
 	if uriOut.Nodes[0].Loon != nodes[0].Line {
 		t.Errorf("Render().Nodes[0].Loon=%q != RenderLoon[0].Line=%q", uriOut.Nodes[0].Loon, nodes[0].Line)
+	}
+}
+
+func TestV120SelfSignedLocalhostNeverUsedAsServerHost(t *testing.T) {
+	in := RenderInput{
+		InstanceID: "v120",
+		Member:     MemberCred{Name: "alice", UUID: "11111111-2222-3333-4444-555555555555", Password: "secret-pass"},
+		Nodes: []NodeEndpoint{
+			{NodeID: 1, NodeName: "hw-sg", PublicIPv4: "188.239.22.220"},
+		},
+		Inbounds: []InboundEntry{
+			{
+				ID:             1,
+				NodeID:         1,
+				Name:           "Hy2 SelfSigned Localhost",
+				Protocol:       "hysteria2",
+				ListenPort:     26443,
+				CertDomains:     []string{"localhost"},
+				CertSelfSigned:  true,
+				CertFingerprint: "AA:BB:CC:DD",
+				Settings:       json.RawMessage(`{"server_ports":"20000-40000"}`),
+			},
+			{
+				ID:             2,
+				NodeID:         1,
+				Name:           "AnyTLS SelfSigned Bing",
+				Protocol:       "anytls",
+				ListenPort:     26444,
+				CertDomains:    []string{"www.bing.com"},
+				CertSelfSigned: true,
+			},
+			{
+				ID:             3,
+				NodeID:         1,
+				Name:           "AnyTLS LocalDomain",
+				Protocol:       "anytls",
+				ListenPort:     26445,
+				CertDomains:    []string{"localhost", "box.local", "127.0.0.1"},
+				CertSelfSigned: false,
+			},
+		},
+	}
+
+	uriOut, err := Render(in, "uri")
+	if err != nil {
+		t.Fatalf("Render(uri): %v", err)
+	}
+	for _, n := range uriOut.Nodes {
+		if strings.Contains(n.URI, "@localhost:") || strings.Contains(n.URI, "@www.bing.com:") || strings.Contains(n.URI, "@box.local:") {
+			t.Errorf("node %q leaked non-routable/self-signed host into URI: %s", n.Name, n.URI)
+		}
+		if !strings.Contains(n.URI, "@188.239.22.220:") {
+			t.Errorf("node %q expected node IP 188.239.22.220 in URI: %s", n.Name, n.URI)
+		}
+		if strings.Contains(n.URI, "pinSHA256") {
+			t.Errorf("node %q must not emit pinSHA256: %s", n.Name, n.URI)
+		}
+	}
+	// Verify SNI is still preserved for self-signed cert
+	if !strings.Contains(uriOut.Nodes[1].URI, "sni=www.bing.com") {
+		t.Errorf("expected AnyTLS self-signed SNI=www.bing.com preserved: %s", uriOut.Nodes[1].URI)
+	}
+	// Verify Loon Hysteria2 carries server-ports and IP host
+	if !strings.Contains(uriOut.Nodes[0].Loon, "= Hysteria2, 188.239.22.220, 26443") || !strings.Contains(uriOut.Nodes[0].Loon, `server-ports="20000:40000"`) {
+		t.Errorf("unexpected Hy2 Loon line: %s", uriOut.Nodes[0].Loon)
+	}
+
+	// Verify Clash YAML
+	clashOut, err := Render(in, "clash")
+	if err != nil {
+		t.Fatalf("Render(clash): %v", err)
+	}
+	var doc struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	if err := yaml.Unmarshal([]byte(clashOut.Content), &doc); err != nil {
+		t.Fatalf("yaml unmarshal: %v", err)
+	}
+	for _, p := range doc.Proxies {
+		if p["server"] != "188.239.22.220" {
+			t.Errorf("clash proxy %q expected server=188.239.22.220, got %v", p["name"], p["server"])
+		}
+		if p["type"] == "hysteria2" {
+			if _, hasFP := p["fingerprint"]; hasFP {
+				t.Errorf("clash hy2 must not emit fingerprint: %+v", p)
+			}
+		}
+		if p["type"] == "anytls" && p["client-fingerprint"] != "chrome" {
+			t.Errorf("clash anytls expected client-fingerprint=chrome: %+v", p)
+		}
+	}
+}
+
+func TestV120SnellAllFormats(t *testing.T) {
+	in := RenderInput{
+		InstanceID: "snell-test",
+		Member:     MemberCred{Name: "alice", UUID: "u-1", Password: "p-1"},
+		Nodes: []NodeEndpoint{
+			{NodeID: 1, NodeName: "SG", PublicIPv4: "188.239.22.220"},
+		},
+		Inbounds: []InboundEntry{
+			{
+				ID:         1,
+				NodeID:     1,
+				Name:       "Snell Plain",
+				Protocol:   "snell",
+				ListenPort: 26500,
+				Settings:   json.RawMessage(`{"version":5,"psk":"SnellSecretKey31Chars0123456789","obfs_mode":"none","udp":true}`),
+			},
+			{
+				ID:         2,
+				NodeID:     1,
+				Name:       "Snell HTTP",
+				Protocol:   "snell",
+				ListenPort: 26501,
+				Settings:   json.RawMessage(`{"version":5,"psk":"SnellObfsKey31Chars012345678901","obfs_mode":"http","obfs_host":"www.bing.com","udp":false}`),
+			},
+		},
+	}
+
+	// 1. Loon
+	loonNodes, err := RenderLoon(in)
+	if err != nil {
+		t.Fatalf("RenderLoon: %v", err)
+	}
+	if len(loonNodes) != 2 {
+		t.Fatalf("expected 2 loon nodes, got %d", len(loonNodes))
+	}
+	wantPlainLoon := `[SG] Snell Plain = Snell, 188.239.22.220, 26500, "SnellSecretKey31Chars0123456789", version=5, udp=true`
+	if loonNodes[0].Line != wantPlainLoon {
+		t.Errorf("Snell plain Loon mismatch:\n got: %s\nwant: %s", loonNodes[0].Line, wantPlainLoon)
+	}
+	wantHTTPLoon := `[SG] Snell HTTP = Snell, 188.239.22.220, 26501, "SnellObfsKey31Chars012345678901", version=5, udp=false, obfs=http, obfs-host=www.bing.com`
+	if loonNodes[1].Line != wantHTTPLoon {
+		t.Errorf("Snell HTTP Loon mismatch:\n got: %s\nwant: %s", loonNodes[1].Line, wantHTTPLoon)
+	}
+
+	// 2. URI
+	uriOut, err := Render(in, "uri")
+	if err != nil {
+		t.Fatalf("Render(uri): %v", err)
+	}
+	if !strings.HasPrefix(uriOut.Nodes[0].URI, "snell://SnellSecretKey31Chars0123456789@188.239.22.220:26500?") ||
+		!strings.Contains(uriOut.Nodes[0].URI, "version=5") || !strings.Contains(uriOut.Nodes[0].URI, "udp=true") ||
+		strings.Contains(uriOut.Nodes[0].URI, "obfs=") {
+		t.Errorf("unexpected Snell plain URI: %s", uriOut.Nodes[0].URI)
+	}
+	if !strings.HasPrefix(uriOut.Nodes[1].URI, "snell://SnellObfsKey31Chars012345678901@188.239.22.220:26501?") ||
+		!strings.Contains(uriOut.Nodes[1].URI, "obfs=http") || !strings.Contains(uriOut.Nodes[1].URI, "obfs-host=www.bing.com") ||
+		!strings.Contains(uriOut.Nodes[1].URI, "udp=false") {
+		t.Errorf("unexpected Snell HTTP URI: %s", uriOut.Nodes[1].URI)
+	}
+
+	// 3. Clash (Mihomo) YAML
+	clashOut, err := Render(in, "clash")
+	if err != nil {
+		t.Fatalf("Render(clash): %v", err)
+	}
+	var clashDoc struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	if err := yaml.Unmarshal([]byte(clashOut.Content), &clashDoc); err != nil {
+		t.Fatalf("yaml unmarshal: %v", err)
+	}
+	if len(clashDoc.Proxies) != 2 {
+		t.Fatalf("expected 2 clash snell proxies, got %d", len(clashDoc.Proxies))
+	}
+	p0 := clashDoc.Proxies[0]
+	if p0["type"] != "snell" || p0["server"] != "188.239.22.220" || p0["port"] != 26500 ||
+		p0["psk"] != "SnellSecretKey31Chars0123456789" || p0["version"] != 5 || p0["udp"] != true {
+		t.Errorf("unexpected clash Snell plain proxy: %+v", p0)
+	}
+	if _, hasObfs := p0["obfs-opts"]; hasObfs {
+		t.Errorf("Snell plain clash proxy should omit obfs-opts: %+v", p0)
+	}
+	p1 := clashDoc.Proxies[1]
+	obfsOpts, _ := p1["obfs-opts"].(map[string]any)
+	if p1["udp"] != false || obfsOpts["mode"] != "http" || obfsOpts["host"] != "www.bing.com" {
+		t.Errorf("unexpected clash Snell HTTP proxy: %+v", p1)
+	}
+
+	// 4. sing-box JSON
+	sbOut, err := Render(in, "singbox")
+	if err != nil {
+		t.Fatalf("Render(singbox): %v", err)
+	}
+	var sbDoc map[string]any
+	if err := json.Unmarshal([]byte(sbOut.Content), &sbDoc); err != nil {
+		t.Fatalf("singbox json unmarshal: %v", err)
+	}
+	sbObs := sbDoc["outbounds"].([]any)
+	obMap := make(map[string]map[string]any)
+	for _, o := range sbObs {
+		m := o.(map[string]any)
+		obMap[m["tag"].(string)] = m
+	}
+	s0 := obMap["[SG] Snell Plain"]
+	if s0 == nil || s0["type"] != "snell" || s0["server"] != "188.239.22.220" ||
+		int(s0["server_port"].(float64)) != 26500 || int(s0["version"].(float64)) != 5 ||
+		s0["psk"] != "SnellSecretKey31Chars0123456789" {
+		t.Errorf("unexpected singbox Snell plain outbound: %+v", s0)
+	}
+	s1 := obMap["[SG] Snell HTTP"]
+	if s1 == nil || s1["obfs_mode"] != "http" {
+		t.Errorf("unexpected singbox Snell HTTP outbound: %+v", s1)
 	}
 }

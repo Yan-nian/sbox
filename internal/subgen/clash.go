@@ -112,6 +112,8 @@ func buildClashProxy(rn resolvedNode) map[string]any {
 		return buildClashTrojan(rn)
 	case "shadowtls":
 		return buildClashShadowTLS(rn)
+	case "snell":
+		return buildClashSnell(rn)
 	case "socks", "mixed":
 		return buildClashSocks(rn)
 	case "http":
@@ -195,9 +197,6 @@ func buildClashHysteria2(rn resolvedNode) map[string]any {
 	if rn.CertSelfSigned {
 		p["skip-cert-verify"] = true
 	}
-	if rn.CertFingerprint != "" {
-		p["fingerprint"] = rn.CertFingerprint
-	}
 	return p
 }
 
@@ -226,13 +225,14 @@ func buildClashTUIC(rn resolvedNode) map[string]any {
 
 func buildClashAnyTLS(rn resolvedNode) map[string]any {
 	p := map[string]any{
-		"name":     rn.Name,
-		"type":     "anytls",
-		"server":   rn.Host,
-		"port":     rn.Port,
-		"password": strings.TrimSpace(rn.Member.Password),
-		"sni":      resolveSNI(rn, ""),
-		"udp":      true,
+		"name":               rn.Name,
+		"type":               "anytls",
+		"server":             rn.Host,
+		"port":               rn.Port,
+		"password":           strings.TrimSpace(rn.Member.Password),
+		"sni":                resolveSNI(rn, ""),
+		"client-fingerprint": "chrome",
+		"udp":                true,
 	}
 	if rn.CertSelfSigned {
 		p["skip-cert-verify"] = true
@@ -312,6 +312,35 @@ func buildClashShadowTLS(rn resolvedNode) map[string]any {
 			"version":  3,
 		},
 	}
+}
+
+func buildClashSnell(rn resolvedNode) map[string]any {
+	s := rn.snell
+	ver := s.Version
+	if ver != 4 && ver != 5 {
+		ver = 5
+	}
+	udpEnabled := true
+	if s.UDP != nil {
+		udpEnabled = *s.UDP
+	}
+	p := map[string]any{
+		"name":    rn.Name,
+		"type":    "snell",
+		"server":  rn.Host,
+		"port":    rn.Port,
+		"psk":     strings.TrimSpace(s.PSK),
+		"version": ver,
+		"udp":     udpEnabled,
+	}
+	if s.ObfsMode == "http" {
+		opts := map[string]any{"mode": "http"}
+		if h := strings.TrimSpace(s.ObfsHost); h != "" {
+			opts["host"] = h
+		}
+		p["obfs-opts"] = opts
+	}
+	return p
 }
 
 func buildClashSocks(rn resolvedNode) map[string]any {

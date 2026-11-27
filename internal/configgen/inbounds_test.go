@@ -524,6 +524,9 @@ func TestCompileInbound_ValidationErrors(t *testing.T) {
 		{"vless reality missing key", InboundSpec{Tag: "vr2", Protocol: "vless", ListenPort: 443, Settings: json.RawMessage(`{"tls_mode":"reality","reality_handshake_server":"a.com"}`)}},
 		{"shadowsocks 2022 missing server password", InboundSpec{Tag: "ss", Protocol: "shadowsocks", ListenPort: 8388, Settings: json.RawMessage(`{"method":"2022-blake3-aes-128-gcm"}`)}},
 		{"shadowtls missing handshake", InboundSpec{Tag: "st", Protocol: "shadowtls", ListenPort: 443}},
+		{"snell missing psk", InboundSpec{Tag: "sn", Protocol: "snell", ListenPort: 26500, Settings: json.RawMessage(`{"version":5}`)}},
+		{"snell bad version", InboundSpec{Tag: "sn2", Protocol: "snell", ListenPort: 26500, Settings: json.RawMessage(`{"version":3,"psk":"abc"}`)}},
+		{"snell bad obfs_mode", InboundSpec{Tag: "sn3", Protocol: "snell", ListenPort: 26500, Settings: json.RawMessage(`{"version":5,"psk":"abc","obfs_mode":"tls"}`)}},
 		{"bad settings json", InboundSpec{Tag: "bad", Protocol: "mixed", ListenPort: 1080, Settings: json.RawMessage(`{broken`)}},
 	}
 
@@ -533,6 +536,61 @@ func TestCompileInbound_ValidationErrors(t *testing.T) {
 				t.Errorf("expected validation error for %s, got nil", tc.name)
 			}
 		})
+	}
+}
+
+func TestCompileInbound_Snell(t *testing.T) {
+	// 1. Default obfs_mode=none, client-only fields (obfs_host, udp) must NOT leak into sing-box JSON.
+	items, err := CompileInbound(InboundSpec{
+		Tag:        "snell-plain",
+		Protocol:   "snell",
+		ListenPort: 26500,
+		Settings: json.RawMessage(`{
+			"version": 5,
+			"psk": "SnellSecretKey31Chars0123456789",
+			"obfs_mode": "none",
+			"obfs_host": "www.bing.com",
+			"udp": true
+		}`),
+	})
+	if err != nil {
+		t.Fatalf("compile snell plain: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 snell inbound, got %d", len(items))
+	}
+	ib := mustUnmarshalMap(t, items[0])
+	if ib["type"] != "snell" || ib["tag"] != "snell-plain" || ib["listen"] != "::" ||
+		ib["listen_port"] != float64(26500) || ib["version"] != float64(5) ||
+		ib["psk"] != "SnellSecretKey31Chars0123456789" || ib["obfs_mode"] != "none" {
+		t.Errorf("unexpected snell plain inbound: %+v", ib)
+	}
+	if _, hasHost := ib["obfs_host"]; hasHost {
+		t.Errorf("client-only obfs_host must not be emitted into sing-box snell inbound: %+v", ib)
+	}
+	if _, hasUDP := ib["udp"]; hasUDP {
+		t.Errorf("client-only udp must not be emitted into sing-box snell inbound: %+v", ib)
+	}
+
+	// 2. HTTP obfs + version 4 coerced to 5 (sing-box 1.14+ server emits version 5).
+	httpItems, err := CompileInbound(InboundSpec{
+		Tag:        "snell-http",
+		Protocol:   "snell",
+		Listen:     "0.0.0.0",
+		ListenPort: 26501,
+		Settings: json.RawMessage(`{
+			"version": 4,
+			"psk": "SnellObfsKey31Chars012345678901",
+			"obfs_mode": "http",
+			"obfs_host": "www.bing.com"
+		}`),
+	})
+	if err != nil {
+		t.Fatalf("compile snell http: %v", err)
+	}
+	ibHTTP := mustUnmarshalMap(t, httpItems[0])
+	if ibHTTP["listen"] != "0.0.0.0" || ibHTTP["version"] != float64(5) || ibHTTP["obfs_mode"] != "http" {
+		t.Errorf("unexpected snell http inbound: %+v", ibHTTP)
 	}
 }
 

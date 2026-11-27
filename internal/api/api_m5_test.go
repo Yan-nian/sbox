@@ -931,7 +931,7 @@ func TestV102IPDetectHostFallbackAndSubStoreCoercion(t *testing.T) {
 		t.Fatalf("AutoPopulateLocalPublicIP did not persist IPv4: node=%q settings=%q", n1.PublicIPv4, ps.PublicIPv4)
 	}
 
-	// 5. Sub-Store format defaults to "uri" when omitted, AND format="singbox" coerces pushed content to plain URI lines!
+	// 5. Sub-Store format defaults to "clash" when omitted, AND format="singbox" coerces pushed content to Clash Mihomo YAML!
 	var pushedContent string
 	subStoreSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -949,7 +949,7 @@ func TestV102IPDetectHostFallbackAndSubStoreCoercion(t *testing.T) {
 	}))
 	defer subStoreSrv.Close()
 
-	// Default format when omitted on sub_store creation -> "uri"
+	// Default format when omitted on sub_store creation -> "clash"
 	defCreate := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/sync-targets", map[string]any{
 		"name":      "SS Default Fmt",
 		"type":      "sub_store",
@@ -961,11 +961,11 @@ func TestV102IPDetectHostFallbackAndSubStoreCoercion(t *testing.T) {
 	}
 	var defTarget model.SyncTargetView
 	_ = json.Unmarshal(defCreate.Body.Bytes(), &defTarget)
-	if defTarget.Format != "uri" {
-		t.Fatalf("expected default sub_store format='uri', got %q", defTarget.Format)
+	if defTarget.Format != "clash" {
+		t.Fatalf("expected default sub_store format='clash', got %q", defTarget.Format)
 	}
 
-	// Explicit format="singbox" on sub_store target -> pushes plain URI lines (NOT JSON!) with real public IP!
+	// Explicit format="singbox" on sub_store target -> pushes Clash Mihomo YAML (NOT sing-box JSON!) with real public IP!
 	sbCreate := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/sync-targets", map[string]any{
 		"name":      "SS Singbox Coerced",
 		"type":      "sub_store",
@@ -980,8 +980,8 @@ func TestV102IPDetectHostFallbackAndSubStoreCoercion(t *testing.T) {
 	if pushRec.Code != http.StatusOK {
 		t.Fatalf("push coerced sub_store failed (%d): %s", pushRec.Code, pushRec.Body.String())
 	}
-	if !strings.HasPrefix(pushedContent, "ss://") || !strings.Contains(pushedContent, "@188.239.22.220:26150#") {
-		t.Fatalf("expected coerced Sub-Store content to be plain ss:// URI with real public IP, got:\n%s", pushedContent)
+	if !strings.Contains(pushedContent, "proxies:") || !strings.Contains(pushedContent, "server: 188.239.22.220") || !strings.Contains(pushedContent, "port: 26150") {
+		t.Fatalf("expected coerced Sub-Store content to be Clash Mihomo YAML with real public IP, got:\n%s", pushedContent)
 	}
 }
 
@@ -1098,5 +1098,135 @@ func TestV103InboundLinksEndpointURIAndLoon(t *testing.T) {
 	notFoundRec := doJSON(t, srv, http.MethodGet, basePath+"/api/v1/inbounds/9999/links", nil, token)
 	if notFoundRec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown inbound id, got %d", notFoundRec.Code)
+	}
+}
+
+func TestV120SnellDefaultsLinksAndSubStoreClashPush(t *testing.T) {
+	srv, st, _, _, basePath := newTestServer(t)
+	defer srv.StopAutoSync()
+	token := m5InitAdmin(t, srv, basePath)
+	ctx := context.Background()
+
+	_ = st.UpdatePanelSettings(ctx, model.PanelSettings{
+		InstanceID:  "hw-sg",
+		WebBasePath: basePath,
+		ListenPort:  18080,
+		PublicIPv4:  "188.239.22.220",
+		LogLevel:    "info",
+	})
+
+	// 1. Default self-signed cert domain fallback is now www.bing.com (not localhost).
+	certRec := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/certificates/self-signed", map[string]any{"name": "default-self-signed"}, token)
+	if certRec.Code != http.StatusCreated {
+		t.Fatalf("create default self-signed cert failed (%d): %s", certRec.Code, certRec.Body.String())
+	}
+	var cert model.Certificate
+	_ = json.Unmarshal(certRec.Body.Bytes(), &cert)
+	if len(cert.Domains) != 1 || cert.Domains[0] != "www.bing.com" {
+		t.Fatalf("expected default self-signed cert domains=[www.bing.com], got %v", cert.Domains)
+	}
+
+	// 2. GET /api/v1/inbounds/defaults/snell returns 31-char alphanumeric PSK & v5 defaults.
+	defRec := doJSON(t, srv, http.MethodGet, basePath+"/api/v1/inbounds/defaults/snell", nil, token)
+	if defRec.Code != http.StatusOK {
+		t.Fatalf("GET /inbounds/defaults/snell failed (%d): %s", defRec.Code, defRec.Body.String())
+	}
+	var defResp struct {
+		ListenPort int            `json:"listen_port"`
+		Settings   map[string]any `json:"settings"`
+	}
+	_ = json.Unmarshal(defRec.Body.Bytes(), &defResp)
+	psk, _ := defResp.Settings["psk"].(string)
+	if defResp.ListenPort <= 0 ||
+		defResp.Settings["version"] != float64(5) ||
+		defResp.Settings["obfs_mode"] != "none" ||
+		defResp.Settings["obfs_host"] != "www.bing.com" ||
+		defResp.Settings["udp"] != true ||
+		len(psk) != 31 {
+		t.Fatalf("unexpected snell defaults: %+v", defResp)
+	}
+	for _, r := range psk {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			t.Fatalf("snell default PSK must be alphanumeric, got %q", psk)
+		}
+	}
+
+	// 3. Create member + Snell inbound (no cert needed) + verify /links returns URI & native Loon.
+	mRec := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/members", map[string]any{"name": "alice", "enabled": true}, token)
+	var alice model.Member
+	_ = json.Unmarshal(mRec.Body.Bytes(), &alice)
+
+	snellRec := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/inbounds", map[string]any{
+		"node_id":     1,
+		"name":        "Snell Main",
+		"tag":         "snell-main",
+		"protocol":    "snell",
+		"listen_port": 26500,
+		"settings": map[string]any{
+			"version":   5,
+			"psk":       psk,
+			"obfs_mode": "http",
+			"obfs_host": "www.bing.com",
+			"udp":       true,
+		},
+	}, token)
+	if snellRec.Code != http.StatusCreated {
+		t.Fatalf("create snell inbound failed (%d): %s", snellRec.Code, snellRec.Body.String())
+	}
+	var snellIb model.Inbound
+	_ = json.Unmarshal(snellRec.Body.Bytes(), &snellIb)
+
+	linksRec := doJSON(t, srv, http.MethodGet, basePath+"/api/v1/inbounds/"+strconvFormatInt(snellIb.ID)+"/links", nil, token)
+	if linksRec.Code != http.StatusOK {
+		t.Fatalf("GET /inbounds/{id}/links for snell failed (%d): %s", linksRec.Code, linksRec.Body.String())
+	}
+	var linksResp struct {
+		Items []inboundLinkItem `json:"items"`
+	}
+	_ = json.Unmarshal(linksRec.Body.Bytes(), &linksResp)
+	if len(linksResp.Items) != 1 ||
+		!strings.HasPrefix(linksResp.Items[0].URI, "snell://"+psk+"@188.239.22.220:26500?") ||
+		!strings.Contains(linksResp.Items[0].Loon, `= Snell, 188.239.22.220, 26500, "`+psk+`", version=5, udp=true, obfs=http, obfs-host=www.bing.com`) {
+		t.Fatalf("unexpected snell link item: %+v", linksResp.Items)
+	}
+
+	// 4. Pushing a sub_store target with format="uri" auto-promotes to Clash Mihomo YAML when any Snell node exists!
+	var pushedContent string
+	subStoreSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/subs":
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": []any{}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/subs":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			pushedContent, _ = body["content"].(string)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "success"})
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer subStoreSrv.Close()
+
+	tgtRec := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/sync-targets", map[string]any{
+		"name":      "SubStore URI With Snell",
+		"type":      "sub_store",
+		"member_id": alice.ID,
+		"format":    "uri",
+		"config":    map[string]any{"sub_store_url": subStoreSrv.URL, "sub_store_name": "hw-snell"},
+	}, token)
+	if tgtRec.Code != http.StatusCreated {
+		t.Fatalf("create sub_store target failed (%d): %s", tgtRec.Code, tgtRec.Body.String())
+	}
+	var tgt model.SyncTargetView
+	_ = json.Unmarshal(tgtRec.Body.Bytes(), &tgt)
+
+	pushRec := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/sync-targets/"+strconvFormatInt(tgt.ID)+"/push", nil, token)
+	if pushRec.Code != http.StatusOK {
+		t.Fatalf("push sub_store with snell failed (%d): %s", pushRec.Code, pushRec.Body.String())
+	}
+	if !strings.Contains(pushedContent, "proxies:") || !strings.Contains(pushedContent, "type: snell") ||
+		!strings.Contains(pushedContent, "psk: "+psk) || !strings.Contains(pushedContent, "server: 188.239.22.220") {
+		t.Fatalf("expected sub_store push with Snell auto-promoted to Clash YAML, got:\n%s", pushedContent)
 	}
 }

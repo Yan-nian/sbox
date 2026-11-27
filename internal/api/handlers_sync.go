@@ -180,7 +180,7 @@ func (s *Server) handleCreateSyncTarget(w http.ResponseWriter, r *http.Request) 
 	if req.Format != nil && strings.TrimSpace(*req.Format) != "" {
 		t.Format = *req.Format
 	} else if strings.EqualFold(strings.TrimSpace(t.Type), "sub_store") {
-		t.Format = "uri"
+		t.Format = "clash"
 	} else {
 		t.Format = "base64"
 	}
@@ -308,12 +308,27 @@ func (s *Server) executeSyncTargetPush(ctx context.Context, t *model.SyncTarget)
 			Message: fmt.Sprintf("bound member (id=%d) not found: %v", t.MemberID, err),
 		}
 	} else {
-		// Real Sub-Store `source: "local"` parses plain URI lines or Clash YAML, NOT full sing-box client JSON.
+		// Real Sub-Store `source: "local"` parses Clash Mihomo YAML (all 9+ protocols including Snell)
+		// or plain URI lines — NOT full sing-box client JSON!
 		renderFormat := t.Format
-		if t.Type == "sub_store" && renderFormat != "clash" {
-			renderFormat = "uri"
+		if t.Type == "sub_store" {
+			if renderFormat == "singbox" {
+				renderFormat = "clash"
+			} else if renderFormat != "clash" {
+				renderFormat = "uri"
+			}
 		}
 		out, renderErr := s.renderMemberSubscription(ctx, member, renderFormat, "")
+		if renderErr == nil && t.Type == "sub_store" && renderFormat != "clash" {
+			// Automatically promote to Clash Mihomo YAML if any rendered node is Snell so Sub-Store parses it losslessly.
+			for _, n := range out.Nodes {
+				if strings.EqualFold(n.Protocol, "snell") {
+					renderFormat = "clash"
+					out, renderErr = s.renderMemberSubscription(ctx, member, "clash", "")
+					break
+				}
+			}
+		}
 		if renderErr != nil {
 			res = syncer.PushResult{
 				Success: false,

@@ -26,6 +26,17 @@ func randomHighPort() int {
 	return 20000 + int(binary.BigEndian.Uint16(b[:])%29000)
 }
 
+func generateAlphanumericPSK(length int) string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	buf := make([]byte, length)
+	rnd := make([]byte, length)
+	_, _ = rand.Read(rnd)
+	for i := range buf {
+		buf[i] = alphabet[int(rnd[i])%len(alphabet)]
+	}
+	return string(buf)
+}
+
 func (s *Server) handleListInbounds(w http.ResponseWriter, r *http.Request) {
 	nodeID := parseNodeIDQuery(r, 1, true)
 	inbounds, err := s.store.ListInbounds(r.Context(), nodeID)
@@ -122,6 +133,14 @@ func (s *Server) handleInboundDefaults(w http.ResponseWriter, r *http.Request) {
 			"detour_protocol":    "shadowsocks",
 			"ss_method":          method,
 			"ss_server_password": srvKey,
+		}
+	case "snell":
+		settings = map[string]any{
+			"version":   5,
+			"psk":       generateAlphanumericPSK(31),
+			"obfs_mode": "none",
+			"obfs_host": "www.bing.com",
+			"udp":       true,
 		}
 	case "direct":
 		settings = map[string]any{

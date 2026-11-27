@@ -23,6 +23,8 @@ func renderURI(rn resolvedNode) string {
 		return renderTrojanURI(rn)
 	case "shadowtls":
 		return renderShadowTLSURI(rn)
+	case "snell":
+		return renderSnellURI(rn)
 	case "socks", "mixed":
 		return renderSocksURI(rn)
 	case "http":
@@ -97,9 +99,6 @@ func renderHysteria2URI(rn resolvedNode) string {
 	}
 	if rn.CertSelfSigned {
 		q.Set("insecure", "1")
-	}
-	if rn.CertFingerprint != "" {
-		q.Set("pinSHA256", rn.CertFingerprint)
 	}
 
 	return fmt.Sprintf("hysteria2://%s@%s/?%s#%s",
@@ -213,6 +212,33 @@ func renderShadowTLSURI(rn resolvedNode) string {
 
 	return fmt.Sprintf("ss://%s@%s/?%s#%s",
 		userInfo,
+		formatHostPort(rn.Host, rn.Port),
+		q.Encode(),
+		url.PathEscape(rn.Name),
+	)
+}
+
+func renderSnellURI(rn resolvedNode) string {
+	s := rn.snell
+	ver := s.Version
+	if ver != 4 && ver != 5 {
+		ver = 5
+	}
+	udpStr := "true"
+	if s.UDP != nil && !*s.UDP {
+		udpStr = "false"
+	}
+	q := url.Values{}
+	q.Set("version", fmt.Sprintf("%d", ver))
+	q.Set("udp", udpStr)
+	if s.ObfsMode == "http" {
+		q.Set("obfs", "http")
+		if h := strings.TrimSpace(s.ObfsHost); h != "" {
+			q.Set("obfs-host", h)
+		}
+	}
+	return fmt.Sprintf("snell://%s@%s?%s#%s",
+		url.QueryEscape(strings.TrimSpace(s.PSK)),
 		formatHostPort(rn.Host, rn.Port),
 		q.Encode(),
 		url.PathEscape(rn.Name),

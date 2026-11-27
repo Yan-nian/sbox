@@ -130,7 +130,7 @@ export function RemoteSyncTab() {
     setName(t.name);
     setType(t.type);
     setMemberId(String(t.member_id || ""));
-    setFormat(t.format || (t.type === "sub_store" ? "uri" : "base64"));
+    setFormat(t.format || (t.type === "sub_store" ? "clash" : "base64"));
     setMergeMode(t.merge_mode || "replace");
     setAutoPush(t.auto_push !== false);
     setEnabled(t.enabled);
@@ -643,7 +643,7 @@ export function RemoteSyncTab() {
                   const nextType = e.target.value as SyncTargetType;
                   setType(nextType);
                   if (nextType === "sub_store") {
-                    setFormat("uri");
+                    setFormat("clash");
                   }
                 }}
               >
@@ -797,7 +797,7 @@ export function RemoteSyncTab() {
             {type === "sub_store" && (
               <div className="space-y-3">
                 <div className="rounded-md border border-accent/35 bg-accent/10 px-3 py-2 text-[11px] leading-relaxed text-ink-secondary">
-                  Sub-Store 推荐使用「明文 URI 列表」或「Clash YAML」，导入后可由 Sub-Store 导出给 Loon / Clash / sing-box 等任意客户端（若填 sing-box JSON 将自动按 URI 节点推送以确保可解析）
+                  Sub-Store 推荐「Clash Mihomo YAML」，可 100% 无损解析 VLESS / Hy2 / TUIC / AnyTLS / SS-2022 / ShadowTLS / Snell 全协议并导出给 Loon / Surge / Clash
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <Field

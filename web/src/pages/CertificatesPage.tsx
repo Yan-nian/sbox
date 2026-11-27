@@ -110,7 +110,7 @@ export function CertificatesPage({ onNavigate }: { onNavigate?: (route: AppRoute
 
   // Self-signed fields
   const [ssName, setSsName] = useState("");
-  const [ssDomains, setSsDomains] = useState("");
+  const [ssDomains, setSsDomains] = useState("www.bing.com");
   const [ssValidDays, setSsValidDays] = useState("3650");
 
   // External fields
@@ -163,7 +163,7 @@ export function CertificatesPage({ onNavigate }: { onNavigate?: (route: AppRoute
     setAliSecretKey("");
     setDnspodApiKey("");
     setSsName("");
-    setSsDomains("");
+    setSsDomains("www.bing.com");
     setSsValidDays("3650");
     setExtName("");
     setExtCertPath("");
@@ -181,7 +181,7 @@ export function CertificatesPage({ onNavigate }: { onNavigate?: (route: AppRoute
         await api.createSelfSignedCert({
           node_id: activeNodeId,
           name,
-          domains: domains.length > 0 ? domains : ["localhost"],
+          domains: domains.length > 0 ? domains : ["www.bing.com"],
           valid_days: Number.isFinite(days) && days > 0 ? days : 3650,
         });
         toast.success("自签证书已生成", name);
@@ -988,13 +988,13 @@ export function CertificatesPage({ onNavigate }: { onNavigate?: (route: AppRoute
               <Field
                 label="绑定域名或公网 IP (SAN)"
                 htmlFor="ss-domains"
-                hint="多个条目用逗号分隔；例如 bing.com 或本机公网 IPv4，留空默认 localhost"
+                hint="多个条目用逗号分隔；默认 www.bing.com（仅作 TLS SNI，订阅连接自动使用节点公网 IP）"
               >
                 <Input
                   id="ss-domains"
                   value={ssDomains}
                   onChange={(e) => setSsDomains(e.target.value)}
-                  placeholder="bing.com, 127.0.0.1"
+                  placeholder="www.bing.com"
                   className="font-mono"
                 />
               </Field>

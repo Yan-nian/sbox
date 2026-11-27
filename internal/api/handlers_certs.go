@@ -89,6 +89,9 @@ func (s *Server) handleCreateSelfSignedCert(w http.ResponseWriter, r *http.Reque
 	if req.ValidDays <= 0 {
 		req.ValidDays = 3650
 	}
+	if len(req.Domains) == 0 {
+		req.Domains = []string{"www.bing.com"}
+	}
 	nodeID := req.NodeID
 	if nodeID <= 0 {
 		nodeID = parseNodeIDQuery(r, 1, false)

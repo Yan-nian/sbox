@@ -72,6 +72,8 @@ func renderLoonLine(rn resolvedNode) string {
 		return renderLoonShadowsocks(rn)
 	case "shadowtls":
 		return renderLoonShadowTLS(rn)
+	case "snell":
+		return renderLoonSnell(rn)
 	case "trojan":
 		return renderLoonTrojan(rn)
 	case "socks", "mixed":
@@ -156,6 +158,9 @@ func renderLoonHysteria2(rn resolvedNode) string {
 	}
 	if obfs := strings.TrimSpace(s.ObfsPassword); obfs != "" {
 		parts = append(parts, "salamander-password="+quoteLoon(obfs))
+	}
+	if ports := normalizePortRanges(s.ServerPorts, ":"); len(ports) > 0 {
+		parts = append(parts, "server-ports="+quoteLoon(strings.Join(ports, ",")))
 	}
 	if sni := resolveSNI(rn, ""); sni != "" {
 		parts = append(parts, "sni="+sni)
@@ -244,6 +249,33 @@ func renderLoonShadowTLS(rn resolvedNode) string {
 		"shadow-tls-sni=" + hsServer,
 		"shadow-tls-version=3",
 		"udp=true",
+	}
+	return fmt.Sprintf("%s = %s", sanitizeLoonName(rn.Name), strings.Join(parts, ", "))
+}
+
+func renderLoonSnell(rn resolvedNode) string {
+	s := rn.snell
+	ver := s.Version
+	if ver != 4 && ver != 5 {
+		ver = 5
+	}
+	udpEnabled := true
+	if s.UDP != nil {
+		udpEnabled = *s.UDP
+	}
+	parts := []string{
+		"Snell",
+		rn.Host,
+		strconv.Itoa(rn.Port),
+		quoteLoon(s.PSK),
+		"version=" + strconv.Itoa(ver),
+		"udp=" + loonBool(udpEnabled),
+	}
+	if s.ObfsMode == "http" {
+		parts = append(parts, "obfs=http")
+		if h := strings.TrimSpace(s.ObfsHost); h != "" {
+			parts = append(parts, "obfs-host="+h)
+		}
 	}
 	return fmt.Sprintf("%s = %s", sanitizeLoonName(rn.Name), strings.Join(parts, ", "))
 }

@@ -199,6 +199,8 @@ func buildSingboxOutbounds(rn resolvedNode, allocHelperTag func(string) string) 
 		return []map[string]any{buildSingboxTrojan(rn)}
 	case "shadowtls":
 		return buildSingboxShadowTLSPair(rn, allocHelperTag)
+	case "snell":
+		return []map[string]any{buildSingboxSnell(rn)}
 	case "socks", "mixed":
 		return []map[string]any{buildSingboxSocks(rn)}
 	case "http":
@@ -436,6 +438,22 @@ func buildSingboxShadowTLSPair(rn resolvedNode, allocHelperTag func(string) stri
 	}
 
 	return []map[string]any{inner, outer}
+}
+
+func buildSingboxSnell(rn resolvedNode) map[string]any {
+	s := rn.snell
+	ob := map[string]any{
+		"type":        "snell",
+		"tag":         rn.Name,
+		"server":      rn.Host,
+		"server_port": rn.Port,
+		"version":     5,
+		"psk":         strings.TrimSpace(s.PSK),
+	}
+	if s.ObfsMode == "http" {
+		ob["obfs_mode"] = "http"
+	}
+	return ob
 }
 
 func buildSingboxSocks(rn resolvedNode) map[string]any {
