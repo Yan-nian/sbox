@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -26,7 +27,8 @@ func randomHighPort() int {
 }
 
 func (s *Server) handleListInbounds(w http.ResponseWriter, r *http.Request) {
-	inbounds, err := s.store.ListInbounds(r.Context())
+	nodeID := parseNodeIDQuery(r, 1, true)
+	inbounds, err := s.store.ListInbounds(r.Context(), nodeID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list inbounds")
 		return
@@ -146,6 +148,43 @@ func (s *Server) handleInboundDefaults(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) validateInboundCandidate(ctx context.Context, ib model.Inbound) error {
+	nodeID := ib.NodeID
+	if nodeID <= 0 {
+		nodeID = 1
+	}
+	node, err := s.store.GetNode(ctx, nodeID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return errors.New("target node not found")
+		}
+		return err
+	}
+
+	nodeOS := node.OS
+	nodeDataDir := node.DataDir
+	if node.IsLocal {
+		if nodeOS == "" {
+			nodeOS = runtime.GOOS
+		}
+		if nodeDataDir == "" {
+			nodeDataDir = s.dataDir
+		}
+	} else {
+		if s.hub != nil {
+			if rt, ok := s.hub.RuntimeState(nodeID); ok {
+				if rt.OS != "" {
+					nodeOS = rt.OS
+				}
+				if rt.DataDir != "" {
+					nodeDataDir = rt.DataDir
+				}
+			}
+		}
+		if nodeOS == "" {
+			nodeOS = "linux"
+		}
+	}
+
 	members, _ := s.store.ListMembers(ctx)
 	enabledMembers := make([]model.Member, 0, len(members))
 	memberByID := make(map[int64]model.Member, len(members))
@@ -165,11 +204,14 @@ func (s *Server) validateInboundCandidate(ctx context.Context, ib model.Inbound)
 			}
 			return err
 		}
+		if c.NodeID != nodeID {
+			return fmt.Errorf("referenced certificate belongs to node %d, not node %d", c.NodeID, nodeID)
+		}
 		certByID[c.ID] = *c
 	}
 
-	spec := s.buildInboundSpec(ib, enabledMembers, memberByID, certByID)
-	_, err := configgen.CompileInbound(spec)
+	spec := s.buildInboundSpec(ib, nodeOS, nodeDataDir, enabledMembers, memberByID, certByID)
+	_, err = configgen.CompileInbound(spec)
 	return err
 }
 
@@ -194,6 +236,7 @@ func (o *optionalInt64) UnmarshalJSON(data []byte) error {
 }
 
 type inboundPayload struct {
+	NodeID        *int64              `json:"node_id"`
 	Name          *string             `json:"name"`
 	Tag           *string             `json:"tag"`
 	Protocol      *string             `json:"protocol"`
@@ -215,6 +258,14 @@ func (s *Server) handleCreateInbound(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+
+	nodeID := int64(0)
+	if req.NodeID != nil && *req.NodeID > 0 {
+		nodeID = *req.NodeID
+	}
+	if nodeID <= 0 {
+		nodeID = parseNodeIDQuery(r, 1, false)
 	}
 
 	name := ""
@@ -290,6 +341,7 @@ func (s *Server) handleCreateInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ib := &model.Inbound{
+		NodeID:        nodeID,
 		Name:          name,
 		Tag:           tag,
 		Protocol:      proto,
@@ -312,16 +364,16 @@ func (s *Server) handleCreateInbound(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.store.CreateInbound(ctx, ib); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			writeError(w, http.StatusConflict, "an inbound with this tag already exists")
+			writeError(w, http.StatusConflict, "an inbound with this tag already exists on this node")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to create inbound: "+err.Error())
 		return
 	}
 
-	_ = s.RecompileAndApply(ctx)
+	_ = s.RecompileAndApplyNode(ctx, ib.NodeID)
 	if s.telemetry != nil {
-		s.telemetry.PublishLog("info", "panel", fmt.Sprintf("created inbound %q (%s:%d)", ib.Tag, ib.Protocol, ib.ListenPort))
+		s.telemetry.PublishLog("info", "panel", fmt.Sprintf("created inbound %q (%s:%d) on node %d", ib.Tag, ib.Protocol, ib.ListenPort, ib.NodeID))
 	}
 	writeJSON(w, http.StatusCreated, ib)
 }
@@ -410,14 +462,14 @@ func (s *Server) handleUpdateInbound(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.store.UpdateInbound(ctx, ib); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			writeError(w, http.StatusConflict, "an inbound with this tag already exists")
+			writeError(w, http.StatusConflict, "an inbound with this tag already exists on this node")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to update inbound: "+err.Error())
 		return
 	}
 
-	_ = s.RecompileAndApply(ctx)
+	_ = s.RecompileAndApplyNode(ctx, ib.NodeID)
 	writeJSON(w, http.StatusOK, ib)
 }
 
@@ -439,7 +491,7 @@ func (s *Server) handleToggleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = s.RecompileAndApply(ctx)
+	_ = s.RecompileAndApplyNode(ctx, ib.NodeID)
 	writeJSON(w, http.StatusOK, ib)
 }
 
@@ -451,14 +503,21 @@ func (s *Server) handleDeleteInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.DeleteInbound(ctx, id); errors.Is(err, store.ErrNotFound) {
+	ib, err := s.store.GetInbound(ctx, id)
+	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "inbound not found")
 		return
-	} else if err != nil {
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load inbound")
+		return
+	}
+
+	if err := s.store.DeleteInbound(ctx, id); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete inbound")
 		return
 	}
 
-	_ = s.RecompileAndApply(ctx)
+	_ = s.RecompileAndApplyNode(ctx, ib.NodeID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

@@ -4,7 +4,11 @@ import { api, ApiError } from "@/lib/api";
 import { useToast } from "@/components/ui/Toast";
 import { Button, Textarea } from "@/components/ui/primitives";
 
-export function CoreConfigEditor() {
+interface CoreConfigEditorProps {
+  nodeId: number;
+}
+
+export function CoreConfigEditor({ nodeId }: CoreConfigEditorProps) {
   const toast = useToast();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -17,7 +21,7 @@ export function CoreConfigEditor() {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.getCoreConfig();
+      const res = await api.getCoreConfig(nodeId);
       setConfigJson(res.config_json || "{}");
       setOverridePatch(res.override_patch || "");
     } catch (err) {
@@ -25,7 +29,7 @@ export function CoreConfigEditor() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [nodeId]);
 
   useEffect(() => {
     void loadConfig();
@@ -69,13 +73,13 @@ export function CoreConfigEditor() {
     setSaving(true);
     setError(null);
     try {
-      const res = await api.updateCoreOverride(trimmed);
+      const res = await api.updateCoreOverride(trimmed, nodeId);
       if (res.config_json !== undefined) {
         setConfigJson(res.config_json);
       } else {
         await loadConfig();
       }
-      toast.success("已保存覆写补丁", "新配置已编译并通过校验");
+      toast.success("已保存当前节点覆写补丁", "新配置已编译并通过校验");
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : "保存覆写补丁失败";
       setError(msg);
@@ -114,10 +118,10 @@ export function CoreConfigEditor() {
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-hairline px-3.5 py-2.5">
             <div>
               <h3 className="text-xs font-semibold text-ink">
-                自定义 JSON Merge 覆写补丁
+                节点专属 JSON Merge 覆写补丁
               </h3>
               <p className="text-[11px] text-ink-muted">
-                按 RFC 7396 深度合并至编译产物；保存前执行 sing-box check 预检
+                按 RFC 7396 深度合并至当前节点编译产物；在线时自动下发重载
               </p>
             </div>
             <div className="flex items-center gap-1.5">
@@ -153,7 +157,7 @@ export function CoreConfigEditor() {
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-hairline px-3.5 py-2.5">
             <div>
               <h3 className="text-xs font-semibold text-ink">
-                当前最终编译配置 (config.json)
+                当前节点最终编译配置 (config.json)
               </h3>
               <p className="text-[11px] text-ink-muted">
                 适配 sing-box 1.12+ 现代规范（只读预览）

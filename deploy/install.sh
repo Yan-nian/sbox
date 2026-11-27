@@ -2,16 +2,22 @@
 set -euo pipefail
 
 # ==============================================================================
-# sbox-panel Linux One-Click Installer / Upgrader / Uninstaller
+# sbox-panel Linux One-Click Installer / Upgrader / Uninstaller / Agent Installer
 # Supports Linux amd64 & arm64 with systemd, public & private GitHub Releases,
 # and SHA-256 verification against checksums.txt.
-# Preserves data directory across upgrades (and uninstalls unless --purge).
+#
+#   install | upgrade   Install or upgrade the Master panel (data is preserved)
+#   agent               Install the same binary as a managed multi-VPS Agent node
+#   uninstall           Remove a service (data is preserved unless --purge)
+#
+# Preserves data directories across upgrades (and uninstalls unless --purge).
 # ==============================================================================
 
 BINARY_NAME="sbox-panel"
-INSTALL_PATH="${SBOX_BIN_PATH:-/usr/local/bin/${BINARY_NAME}}"
-SERVICE_BASE="${SBOX_SERVICE_NAME:-sbox-panel}"
-DATA_DIR="${SBOX_DATA_DIR:-/var/lib/sbox-panel}"
+# Empty values are resolved after argument parsing (explicit > existing unit > default).
+INSTALL_PATH="${SBOX_BIN_PATH:-}"
+SERVICE_BASE="${SBOX_SERVICE_NAME:-}"
+DATA_DIR="${SBOX_DATA_DIR:-}"
 PORT="${SBOX_PORT:-18080}"
 LISTEN_ADDR="${SBOX_LISTEN:-}"
 PORT_EXPLICIT=0
@@ -20,6 +26,12 @@ LISTEN_EXPLICIT=0
 REPO="${SBOX_REPO:-Yan-nian/sbox}"
 VERSION="${SBOX_VERSION:-latest}"
 GH_TOKEN="${GITHUB_TOKEN:-}"
+NODE_TOKEN="${SBOX_TOKEN:-}"
+NODE_MASTER="${SBOX_MASTER:-}"
+AGENT_INSECURE=0
+case "${SBOX_INSECURE:-}" in
+  1|true|TRUE|True|yes|YES) AGENT_INSECURE=1 ;;
+esac
 DOWNLOAD_URL="${SBOX_DOWNLOAD_URL:-}"
 LOCAL_BINARY=""
 GH_PROXY="${SBOX_GH_PROXY:-}"
@@ -30,6 +42,7 @@ TMP_DIR=""
 
 SERVICE_NAME=""
 SERVICE_PATH=""
+ENV_FILE=""
 
 if [ -t 1 ]; then
   C_RESET='\033[0m'
@@ -63,35 +76,53 @@ sbox-panel Linux installer
 
 Usage:
   sudo bash install.sh [install|upgrade|uninstall] [options]
+  sudo bash install.sh agent --master <url> --token <node_token> [options]
 
 Commands:
-  install                  Install sbox-panel (or upgrade in-place if already installed) [default]
-  upgrade                  Upgrade binary and refresh systemd unit while preserving data
-  uninstall                Stop/remove service and binary (preserves data unless --purge)
+  install                  Install the Master panel (or upgrade in-place if already installed) [default]
+  upgrade                  Upgrade the binary of an installed service while preserving data and config
+                           (works for the Master panel and for Agents: --service-name sbox-agent)
+  agent                    Install the same binary as a managed Agent node controlled by a Master panel
+  uninstall                Stop/remove a service (preserves data unless --purge)
 
-Options:
+Common options:
   --repo <owner/repo>      GitHub repository (env: SBOX_REPO, default: ${REPO})
   --version <tag|latest>   Release tag to install (env: SBOX_VERSION, default: ${VERSION})
-  --token <gh_token>       GitHub token for private repos / higher API limits (env: GITHUB_TOKEN)
-  --service-name <name>    systemd service name without .service (env: SBOX_SERVICE_NAME, default: ${SERVICE_BASE})
-  --data-dir <dir>         Persistent data directory (env: SBOX_DATA_DIR, default: ${DATA_DIR})
-  --port <port>            Panel listen port (env: SBOX_PORT, default: ${PORT})
-  --listen <addr>          Explicit listen address host:port (env: SBOX_LISTEN, overrides --port)
-  --bin-path <path>        Target binary install path (env: SBOX_BIN_PATH, default: ${INSTALL_PATH})
+  --gh-token <gh_token>    GitHub token for private repos / higher API limits (env: GITHUB_TOKEN)
+  --service-name <name>    systemd service name without .service (env: SBOX_SERVICE_NAME,
+                           default: sbox-panel, or sbox-agent for the agent command)
+  --data-dir <dir>         Persistent data directory (env: SBOX_DATA_DIR,
+                           default: existing unit value, else /var/lib/<service-name>)
+  --bin-path <path>        Target binary install path (env: SBOX_BIN_PATH,
+                           default: existing unit value, else /usr/local/bin/sbox-panel)
   --binary <path>          Install/upgrade directly from a local sbox-panel binary
   --download-url <url>     Download binary or .tar.gz archive from an explicit URL
   --proxy <prefix>         GitHub download proxy URL prefix for public repos (e.g. https://ghproxy.net/)
   --skip-verify            Skip SHA-256 verification against checksums.txt
-  --uninstall              Alias for the uninstall command
-  --purge                  With uninstall, also delete the data directory
   -h, --help               Show this help message
+
+Master options (install / upgrade):
+  --port <port>            Panel listen port (env: SBOX_PORT, default: 18080)
+  --listen <addr>          Explicit listen address host:port (env: SBOX_LISTEN, overrides --port)
+  --token <gh_token>       Legacy alias of --gh-token (GitHub token) for install/upgrade/uninstall
+
+Agent options (agent):
+  --master <url>           Master panel URL incl. secret base path, e.g. https://1.2.3.4:18080/sbox-xxxx (env: SBOX_MASTER)
+  --token <node_token>     Node token created in the Master panel (also: --node-token, env: SBOX_TOKEN).
+                           NOTE: for the agent command --token is the NODE token, never the GitHub token
+  --insecure               Skip TLS certificate verification when connecting to the Master
+  The node token and master URL are stored in /etc/<service-name>.env (chmod 600), not on the command line.
+
+Uninstall options:
+  --uninstall              Alias for the uninstall command
+  --purge                  With uninstall, also delete the data directory (and agent env file)
 EOF
 }
 
 parse_args() {
   if [ "$#" -gt 0 ]; then
     case "$1" in
-      install|upgrade|uninstall)
+      install|upgrade|uninstall|agent)
         ACTION="$1"
         shift
         ;;
@@ -110,10 +141,33 @@ parse_args() {
         REPO="$2"
         shift 2
         ;;
-      --token)
-        [ "$#" -ge 2 ] || { log_err "--token requires a value"; exit 1; }
+      --gh-token)
+        [ "$#" -ge 2 ] || { log_err "--gh-token requires a value"; exit 1; }
         GH_TOKEN="$2"
         shift 2
+        ;;
+      --token)
+        [ "$#" -ge 2 ] || { log_err "--token requires a value"; exit 1; }
+        if [ "$ACTION" = "agent" ]; then
+          NODE_TOKEN="$2"
+        else
+          GH_TOKEN="$2"
+        fi
+        shift 2
+        ;;
+      --node-token)
+        [ "$#" -ge 2 ] || { log_err "--node-token requires a value"; exit 1; }
+        NODE_TOKEN="$2"
+        shift 2
+        ;;
+      --master)
+        [ "$#" -ge 2 ] || { log_err "--master requires a URL"; exit 1; }
+        NODE_MASTER="$2"
+        shift 2
+        ;;
+      --insecure)
+        AGENT_INSECURE=1
+        shift
         ;;
       --service-name)
         [ "$#" -ge 2 ] || { log_err "--service-name requires a value"; exit 1; }
@@ -180,7 +234,32 @@ parse_args() {
         ;;
     esac
   done
+}
 
+# Values from an existing systemd unit (used to keep upgrades non-destructive).
+unit_exec_bin() {
+  [ -f "$SERVICE_PATH" ] || return 0
+  sed -n 's/^ExecStart=\([^ ]*\) .*/\1/p' "$SERVICE_PATH" | head -n 1
+}
+
+unit_exec_opt() {
+  local opt="$1"
+  [ -f "$SERVICE_PATH" ] || return 0
+  sed -n "s/^ExecStart=.* ${opt} \\([^ ]*\\).*/\\1/p" "$SERVICE_PATH" | head -n 1
+}
+
+unit_is_agent() {
+  [ -f "$SERVICE_PATH" ] && grep -Eq '^ExecStart=[^ ]+ agent( |$)' "$SERVICE_PATH"
+}
+
+resolve_settings() {
+  if [ -z "$SERVICE_BASE" ]; then
+    if [ "$ACTION" = "agent" ]; then
+      SERVICE_BASE="sbox-agent"
+    else
+      SERVICE_BASE="sbox-panel"
+    fi
+  fi
   SERVICE_BASE="${SERVICE_BASE%.service}"
   if [ -z "$SERVICE_BASE" ]; then
     log_err "--service-name cannot be empty"
@@ -188,6 +267,17 @@ parse_args() {
   fi
   SERVICE_NAME="${SERVICE_BASE}.service"
   SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
+  ENV_FILE="/etc/${SERVICE_BASE}.env"
+
+  if [ -z "$INSTALL_PATH" ]; then
+    INSTALL_PATH="$(unit_exec_bin)"
+    [ -n "$INSTALL_PATH" ] || INSTALL_PATH="/usr/local/bin/${BINARY_NAME}"
+  fi
+
+  if [ -z "$DATA_DIR" ]; then
+    DATA_DIR="$(unit_exec_opt --data-dir)"
+    [ -n "$DATA_DIR" ] || DATA_DIR="/var/lib/${SERVICE_BASE}"
+  fi
 
   case "$PORT" in
     ''|*[!0-9]*)
@@ -200,10 +290,39 @@ parse_args() {
     exit 1
   fi
 
-  if [ "$LISTEN_EXPLICIT" -eq 0 ]; then
-    if [ "$PORT_EXPLICIT" -eq 1 ] || [ -z "$LISTEN_ADDR" ]; then
+  if [ "$ACTION" != "agent" ] && [ "$LISTEN_EXPLICIT" -eq 0 ]; then
+    if [ "$PORT_EXPLICIT" -eq 1 ]; then
       LISTEN_ADDR="0.0.0.0:${PORT}"
+    elif [ -z "$LISTEN_ADDR" ]; then
+      if ! unit_is_agent; then
+        LISTEN_ADDR="$(unit_exec_opt --listen)"
+      fi
+      [ -n "$LISTEN_ADDR" ] || LISTEN_ADDR="0.0.0.0:${PORT}"
     fi
+  fi
+
+  if [ "$ACTION" = "agent" ]; then
+    if [ -z "$NODE_MASTER" ]; then
+      log_err "agent requires --master <url> (the Master panel URL including its secret base path)"
+      exit 1
+    fi
+    case "$NODE_MASTER" in
+      http://*|https://*|ws://*|wss://*) ;;
+      *)
+        log_err "Invalid --master '${NODE_MASTER}': must start with http://, https://, ws:// or wss://"
+        exit 1
+        ;;
+    esac
+    if [ -z "$NODE_TOKEN" ]; then
+      log_err "agent requires --token <node_token> (create the node in the Master panel to obtain it)"
+      exit 1
+    fi
+    case "$NODE_TOKEN$NODE_MASTER" in
+      *[[:space:]]*)
+        log_err "--master and --token must not contain whitespace"
+        exit 1
+        ;;
+    esac
   fi
 }
 
@@ -264,18 +383,25 @@ http_get_public() {
   fi
 }
 
+# http_get_github_json <url> <dest> [quiet]
+# With "quiet", curl does not print its own error message (-S is omitted) so an
+# expected 404 (e.g. no stable release yet) does not pollute stderr.
 http_get_github_json() {
   local url="$1"
   local dest="$2"
+  local curl_flags="-fsSL"
+  if [ "${3:-}" = "quiet" ]; then
+    curl_flags="-fsL"
+  fi
   if command -v curl >/dev/null 2>&1; then
     if [ -n "$GH_TOKEN" ]; then
-      curl -fsSL --retry 3 --connect-timeout 15 \
+      curl "$curl_flags" --retry 3 --connect-timeout 15 \
         -H "Authorization: Bearer ${GH_TOKEN}" \
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
         -o "$dest" "$url"
     else
-      curl -fsSL --retry 3 --connect-timeout 15 \
+      curl "$curl_flags" --retry 3 --connect-timeout 15 \
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
         -o "$dest" "$url"
@@ -504,17 +630,20 @@ prepare_binary() {
     fi
 
     log_info "Querying GitHub Release metadata for ${REPO} (${VERSION})..."
-    if ! http_get_github_json "$api_url" "$release_json"; then
-      if [ "$VERSION" = "latest" ]; then
-        log_warn "No stable release found via /releases/latest; falling back to most recent release (including pre-releases)..."
+    if [ "$VERSION" = "latest" ]; then
+      # Quiet probe: a 404 here just means "no stable release yet" and is handled below.
+      if ! http_get_github_json "$api_url" "$release_json" quiet; then
+        log_info "No stable release found via /releases/latest; falling back to the most recent release (including pre-releases)..."
         if ! http_get_github_json "https://api.github.com/repos/${REPO}/releases?per_page=1" "$release_json"; then
           log_err "Failed to fetch release metadata for ${REPO} (${VERSION})."
-          log_err "Tip: if the repo is private pass --token <gh_token>, or pass --binary <path>."
+          log_err "Tip: if the repo is private pass --gh-token <gh_token>, or pass --binary <path>."
           exit 1
         fi
-      else
+      fi
+    else
+      if ! http_get_github_json "$api_url" "$release_json"; then
         log_err "Failed to fetch release metadata for ${REPO} (${VERSION})."
-        log_err "Tip: check --repo / --version, or pass --token <gh_token> for private repos, or --binary <path>."
+        log_err "Tip: check --repo / --version, or pass --gh-token <gh_token> for private repos, or --binary <path>."
         exit 1
       fi
     fi
@@ -608,11 +737,15 @@ unpack_or_copy() {
   esac
 }
 
-write_systemd_unit() {
-  local state_dir_block=""
+state_dir_block() {
   if [ "$DATA_DIR" = "/var/lib/${SERVICE_BASE}" ]; then
-    state_dir_block=$'StateDirectory='"${SERVICE_BASE}"$'\nStateDirectoryMode=0750'
+    printf 'StateDirectory=%s\nStateDirectoryMode=0750' "$SERVICE_BASE"
   fi
+}
+
+write_systemd_unit() {
+  local state_block
+  state_block="$(state_dir_block)"
 
   cat > "$SERVICE_PATH" <<EOF
 [Unit]
@@ -626,12 +759,83 @@ StartLimitBurst=5
 [Service]
 Type=simple
 WorkingDirectory=${DATA_DIR}
-${state_dir_block}
+${state_block}
 EnvironmentFile=-/etc/default/${SERVICE_BASE}
 ExecStart=${INSTALL_PATH} serve --data-dir ${DATA_DIR} --listen ${LISTEN_ADDR}
 
 Restart=on-failure
 RestartSec=5s
+TimeoutStopSec=15s
+KillMode=mixed
+
+LimitNOFILE=1048576
+TasksMax=4096
+
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=${DATA_DIR}
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=${SERVICE_BASE}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  chmod 0644 "$SERVICE_PATH"
+}
+
+# The node token and master URL live in a root-only EnvironmentFile so they never
+# appear in `ps aux` / `systemctl status` command lines.
+write_agent_env() {
+  local old_umask
+  old_umask="$(umask)"
+  umask 077
+  {
+    printf '# Managed by sbox-panel install.sh (agent). Contains the node token - keep private.\n'
+    printf 'SBOX_MASTER=%s\n' "$NODE_MASTER"
+    printf 'SBOX_TOKEN=%s\n' "$NODE_TOKEN"
+  } > "$ENV_FILE"
+  umask "$old_umask"
+  chmod 0600 "$ENV_FILE"
+  chown root:root "$ENV_FILE" 2>/dev/null || true
+}
+
+write_agent_unit() {
+  local state_block insecure_flag=""
+  state_block="$(state_dir_block)"
+  if [ "$AGENT_INSECURE" -eq 1 ]; then
+    insecure_flag=" --insecure"
+  fi
+
+  cat > "$SERVICE_PATH" <<EOF
+[Unit]
+Description=sbox-agent - sbox-panel managed node agent
+Documentation=https://github.com/${REPO}
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=${DATA_DIR}
+${state_block}
+EnvironmentFile=${ENV_FILE}
+ExecStart=${INSTALL_PATH} agent --data-dir ${DATA_DIR}${insecure_flag}
+
+Restart=always
+RestartSec=5
 TimeoutStopSec=15s
 KillMode=mixed
 
@@ -701,11 +905,49 @@ wait_and_show_url() {
   fi
 }
 
+# Agents have no panel URL; confirm the service stays up and show the connection log.
+wait_and_show_agent() {
+  local i=0
+  while [ "$i" -lt 6 ]; do
+    if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+      log_err "${SERVICE_NAME} failed to stay running. Recent logs:"
+      journalctl -u "$SERVICE_NAME" -n 30 --no-pager >&2 || true
+      return 1
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+
+  printf "\n"
+  log_ok "${SERVICE_BASE} is running!"
+  printf "============================================================\n"
+  printf "Binary   : %s\n" "$INSTALL_PATH"
+  printf "Data dir : %s\n" "$DATA_DIR"
+  if [ -f "$ENV_FILE" ]; then
+    printf "Env file : %s (chmod 600)\n" "$ENV_FILE"
+  fi
+  printf "Service  : systemctl status %s\n" "$SERVICE_NAME"
+  printf "Logs     : journalctl -u %s -f\n" "$SERVICE_NAME"
+  printf "The node should now appear as online in the Master panel (Nodes page).\n"
+  printf "============================================================\n"
+  journalctl -u "$SERVICE_NAME" -n 8 --no-pager 2>/dev/null || true
+  return 0
+}
+
 do_install_or_upgrade() {
   require_root
   require_linux_systemd
 
   local arch is_upgrade=0 backup_path="${INSTALL_PATH}.bak"
+  # mode: serve (master unit written), agent (agent unit + env written),
+  #       agent-keep (existing agent unit/env left untouched, binary only)
+  local mode="serve"
+  if [ "$ACTION" = "agent" ]; then
+    mode="agent"
+  elif unit_is_agent; then
+    mode="agent-keep"
+  fi
+
   arch="$(detect_arch)"
   TMP_DIR="$(mktemp -d)"
 
@@ -713,7 +955,10 @@ do_install_or_upgrade() {
     is_upgrade=1
     log_info "Existing ${SERVICE_BASE} installation detected; performing in-place upgrade (preserving ${DATA_DIR})."
   else
-    log_info "Installing ${SERVICE_BASE} for linux/${arch}..."
+    log_info "Installing ${SERVICE_BASE} (${mode}) for linux/${arch}..."
+  fi
+  if [ "$mode" = "agent-keep" ]; then
+    log_info "Agent unit detected: keeping existing unit and ${ENV_FILE} untouched (binary-only upgrade)."
   fi
 
   local staged_bin="${TMP_DIR}/${BINARY_NAME}"
@@ -737,7 +982,17 @@ do_install_or_upgrade() {
   install -m 0755 "$staged_bin" "${INSTALL_PATH}.new"
   mv -f "${INSTALL_PATH}.new" "$INSTALL_PATH"
 
-  write_systemd_unit
+  case "$mode" in
+    serve)
+      write_systemd_unit
+      ;;
+    agent)
+      write_agent_env
+      write_agent_unit
+      ;;
+    agent-keep)
+      ;;
+  esac
   systemctl daemon-reload
   systemctl enable "$SERVICE_NAME" >/dev/null
 
@@ -755,7 +1010,14 @@ do_install_or_upgrade() {
     exit 1
   fi
 
-  if wait_and_show_url; then
+  local ok=0
+  if [ "$mode" = "serve" ]; then
+    wait_and_show_url && ok=1
+  else
+    wait_and_show_agent && ok=1
+  fi
+
+  if [ "$ok" -eq 1 ]; then
     rm -f "$backup_path"
   else
     if [ "$is_upgrade" -eq 1 ] && [ -f "$backup_path" ]; then
@@ -765,6 +1027,19 @@ do_install_or_upgrade() {
     fi
     exit 1
   fi
+}
+
+# True when another systemd unit (not ours) still runs the given binary.
+binary_used_by_other_unit() {
+  local unit
+  for unit in /etc/systemd/system/*.service; do
+    [ -f "$unit" ] || continue
+    [ "$unit" = "$SERVICE_PATH" ] && continue
+    if grep -Eq "^ExecStart=${INSTALL_PATH} " "$unit"; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 do_uninstall() {
@@ -777,19 +1052,35 @@ do_uninstall() {
     systemctl disable "$SERVICE_NAME" 2>/dev/null || true
   fi
 
+  local was_agent=0
+  if unit_is_agent; then
+    was_agent=1
+  fi
+
   rm -f "$SERVICE_PATH"
   systemctl daemon-reload
   systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
 
-  rm -f "$INSTALL_PATH" "${INSTALL_PATH}.bak" "${INSTALL_PATH}.new"
+  if binary_used_by_other_unit; then
+    log_info "Keeping ${INSTALL_PATH}: still used by another systemd service."
+    rm -f "${INSTALL_PATH}.bak" "${INSTALL_PATH}.new"
+  else
+    rm -f "$INSTALL_PATH" "${INSTALL_PATH}.bak" "${INSTALL_PATH}.new"
+  fi
 
   if [ "$PURGE" -eq 1 ]; then
     if [ -n "$DATA_DIR" ] && [ "$DATA_DIR" != "/" ]; then
       log_warn "Removing data directory ${DATA_DIR} (--purge specified)..."
       rm -rf "$DATA_DIR"
     fi
+    if [ "$was_agent" -eq 1 ] || [ "$ACTION" = "agent" ]; then
+      rm -f "$ENV_FILE"
+    fi
   else
     log_info "Preserved data directory: ${DATA_DIR} (pass --purge to delete it)."
+    if [ -f "$ENV_FILE" ]; then
+      log_info "Preserved ${ENV_FILE} (pass --purge to delete it)."
+    fi
   fi
 
   log_ok "${SERVICE_BASE} uninstalled."
@@ -797,8 +1088,9 @@ do_uninstall() {
 
 main() {
   parse_args "$@"
+  resolve_settings
   case "$ACTION" in
-    install|upgrade)
+    install|upgrade|agent)
       do_install_or_upgrade
       ;;
     uninstall)

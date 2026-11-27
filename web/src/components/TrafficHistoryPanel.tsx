@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { BarChart3, Radio, RefreshCw, RotateCcw, Users } from "lucide-react";
+import { BarChart3, Radio, RefreshCw, RotateCcw, Server, Users } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { formatBytes } from "@/lib/format";
+import { useNode } from "@/contexts/NodeContext";
 import { useToast } from "@/components/ui/Toast";
 import { Badge, Button, Panel } from "@/components/ui/primitives";
 import type { TrafficRange, TrafficStatsResponse } from "@/types/api";
@@ -24,19 +25,23 @@ function formatBucketLabel(iso: string, range: TrafficRange): string {
 }
 
 export function TrafficHistoryPanel() {
+  const { activeNodeId, activeNode, nodes } = useNode();
   const toast = useToast();
   const [range, setRange] = useState<TrafficRange>("24h");
+  const [scopeAllNodes, setScopeAllNodes] = useState(true);
   const [stats, setStats] = useState<TrafficStatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [resetting, setResetting] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
+  const queryNodeId = scopeAllNodes ? undefined : activeNodeId;
+
   const loadStats = useCallback(
-    async (r: TrafficRange) => {
+    async (r: TrafficRange, nodeId?: number) => {
       setLoading(true);
       try {
-        const res = await api.getTrafficStats({ range: r });
+        const res = await api.getTrafficStats({ range: r, node_id: nodeId });
         setStats(res);
       } catch (err) {
         toast.error("加载历史流量统计失败", err instanceof ApiError ? err.message : undefined);
@@ -48,8 +53,8 @@ export function TrafficHistoryPanel() {
   );
 
   useEffect(() => {
-    void loadStats(range);
-  }, [range, loadStats]);
+    void loadStats(range, queryNodeId);
+  }, [range, queryNodeId, loadStats]);
 
   const handleResetAll = async () => {
     setResetting(true);
@@ -57,7 +62,7 @@ export function TrafficHistoryPanel() {
       await api.resetTraffic({ scope: "all" });
       setConfirmReset(false);
       toast.success("已重置全部流量统计");
-      await loadStats(range);
+      await loadStats(range, queryNodeId);
     } catch (err) {
       toast.error("重置流量失败", err instanceof ApiError ? err.message : undefined);
     } finally {
@@ -68,6 +73,7 @@ export function TrafficHistoryPanel() {
   const series = stats?.series ?? [];
   const byMember = stats?.by_member ?? [];
   const byInbound = stats?.by_inbound ?? [];
+  const byNode = stats?.by_node ?? [];
 
   const { maxBucket, sumUp, sumDown } = useMemo(() => {
     let maxVal = 1;
@@ -101,15 +107,55 @@ export function TrafficHistoryPanel() {
     [byInbound],
   );
 
+  const topNodeMax = useMemo(
+    () =>
+      Math.max(
+        1,
+        ...byNode.map((n) => (n.upload_bytes || 0) + (n.download_bytes || 0)),
+      ),
+    [byNode],
+  );
+
   const activeBucket =
     hoverIdx !== null && series[hoverIdx] ? series[hoverIdx] : null;
+
+  const showNodeBreakdown = byNode.length > 0;
 
   return (
     <Panel
       title="历史流量归档与排行"
-      description="由 Clash API 连接追踪器按小时/日聚合落盘至 SQLite，支持按成员与入站维度分析"
+      description="由各节点 Clash API 连接追踪器聚合上报并落盘主控 SQLite，支持按节点、成员与入站多维统计"
       actions={
         <div className="flex flex-wrap items-center gap-2">
+          {nodes.length > 1 && (
+            <div className="inline-flex rounded-md border border-hairline bg-recessed p-0.5 text-xs">
+              <button
+                type="button"
+                onClick={() => setScopeAllNodes(true)}
+                className={cn(
+                  "rounded px-2 py-1 transition-colors",
+                  scopeAllNodes
+                    ? "bg-surface font-medium text-accent"
+                    : "text-ink-muted hover:text-ink",
+                )}
+              >
+                全集群
+              </button>
+              <button
+                type="button"
+                onClick={() => setScopeAllNodes(false)}
+                className={cn(
+                  "max-w-[120px] truncate rounded px-2 py-1 font-mono transition-colors",
+                  !scopeAllNodes
+                    ? "bg-surface font-medium text-accent"
+                    : "text-ink-muted hover:text-ink",
+                )}
+              >
+                {activeNode?.name || "当前节点"}
+              </button>
+            </div>
+          )}
+
           <div className="inline-flex rounded-md border border-hairline bg-recessed p-0.5 text-xs">
             {RANGES.map((item) => (
               <button
@@ -132,7 +178,7 @@ export function TrafficHistoryPanel() {
             variant="ghost"
             size="xs"
             loading={loading}
-            onClick={() => void loadStats(range)}
+            onClick={() => void loadStats(range, queryNodeId)}
           >
             <RefreshCw className="h-3.5 w-3.5" />
           </Button>
@@ -264,8 +310,57 @@ export function TrafficHistoryPanel() {
           </div>
         </div>
 
-        {/* Side-by-side Top Members & Top Inbounds breakdown */}
-        <div className="grid gap-4 border-t border-hairline pt-4 lg:grid-cols-2">
+        {/* Breakdown: By Node + Top Members + Top Inbounds */}
+        <div
+          className={cn(
+            "grid gap-4 border-t border-hairline pt-4",
+            showNodeBreakdown ? "lg:grid-cols-3" : "lg:grid-cols-2",
+          )}
+        >
+          {showNodeBreakdown && (
+            <div className="space-y-2.5">
+              <div className="flex items-center gap-1.5 text-xs font-medium text-ink">
+                <Server className="h-3.5 w-3.5 text-ok" />
+                <span>节点流量分布 (By Node)</span>
+              </div>
+
+              <div className="space-y-2">
+                {byNode.slice(0, 6).map((row) => {
+                  const total = (row.upload_bytes || 0) + (row.download_bytes || 0);
+                  const pct = Math.min(100, Math.round((total / topNodeMax) * 100));
+                  return (
+                    <div
+                      key={row.id || row.name}
+                      className="rounded border border-hairline bg-recessed/60 px-3 py-2 text-xs"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex min-w-0 items-center gap-1.5">
+                          <span className="truncate font-mono font-medium text-ink">
+                            {row.name}
+                          </span>
+                          <Badge tone={row.is_local ? "accent" : "neutral"}>
+                            {row.is_local ? "本机" : "远端"}
+                          </Badge>
+                        </div>
+                        <span className="shrink-0 font-mono text-[11px] tabular-nums">
+                          <span className="text-uplink">↑ {formatBytes(row.upload_bytes)}</span>
+                          <span className="mx-1 text-ink-muted">/</span>
+                          <span className="text-accent">↓ {formatBytes(row.download_bytes)}</span>
+                        </span>
+                      </div>
+                      <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-hairline">
+                        <div
+                          className="h-full rounded-full bg-ok"
+                          style={{ width: `${total > 0 ? Math.max(3, pct) : 0}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Top Members */}
           <div className="space-y-2.5">
             <div className="flex items-center gap-1.5 text-xs font-medium text-ink">
@@ -293,7 +388,7 @@ export function TrafficHistoryPanel() {
                         </span>
                         <span className="shrink-0 font-mono text-[11px] tabular-nums">
                           <span className="text-uplink">↑ {formatBytes(row.upload_bytes)}</span>
-                          <span className="mx-1.5 text-ink-muted">/</span>
+                          <span className="mx-1 text-ink-muted">/</span>
                           <span className="text-accent">↓ {formatBytes(row.download_bytes)}</span>
                         </span>
                       </div>
@@ -342,7 +437,7 @@ export function TrafficHistoryPanel() {
                         </div>
                         <span className="shrink-0 font-mono text-[11px] tabular-nums">
                           <span className="text-uplink">↑ {formatBytes(row.upload_bytes)}</span>
-                          <span className="mx-1.5 text-ink-muted">/</span>
+                          <span className="mx-1 text-ink-muted">/</span>
                           <span className="text-accent">↓ {formatBytes(row.download_bytes)}</span>
                         </span>
                       </div>

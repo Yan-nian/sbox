@@ -57,3 +57,41 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # ----------------------------------------------------------------------------
+  # Optional: run the SAME image as a managed Agent node (multi-VPS control plane).
+  # Create the node in the Master panel (Nodes page) to obtain the master URL and
+  # node token, then uncomment this service on the remote VPS (use a separate
+  # compose project/directory from the Master, or rename `./agent-data`).
+  #
+  #   SBOX_MASTER   - Master panel URL including its secret base path,
+  #                   e.g. https://master.example.com:18080/sbox-xxxxxxxx
+  #   SBOX_TOKEN    - node token shown when the node was created (keep it private;
+  #                   prefer an `.env` file or Docker secrets over inline values)
+  #   SBOX_INSECURE - set to "true" to skip TLS verification (self-signed Master)
+  # ----------------------------------------------------------------------------
+  # sbox-agent:
+  #   image: ${SBOX_IMAGE:-sbox-panel:latest}
+  #   container_name: sbox-agent
+  #   restart: unless-stopped
+  #   network_mode: host
+  #   cap_add:
+  #     - NET_BIND_SERVICE
+  #   ulimits:
+  #     nofile:
+  #       soft: 1048576
+  #       hard: 1048576
+  #   environment:
+  #     SBOX_MASTER: ${SBOX_MASTER:?set SBOX_MASTER to the Master panel URL}
+  #     SBOX_TOKEN: ${SBOX_TOKEN:?set SBOX_TOKEN to the node token}
+  #     SBOX_DATA_DIR: /data
+  #     SBOX_INSECURE: ${SBOX_INSECURE:-false}
+  #     TZ: ${TZ:-UTC}
+  #   volumes:
+  #     - ./agent-data:/data
+  #   command: ["agent", "--data-dir", "/data"]
+  #   logging:
+  #     driver: json-file
+  #     options:
+  #       max-size: "10m"
+  #       max-file: "3"

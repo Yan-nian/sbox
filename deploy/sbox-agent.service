@@ -1,0 +1,58 @@
+# Reference systemd unit for an sbox-panel Agent node.
+# `deploy/install.sh agent --master <url> --token <node_token>` generates an equivalent unit
+# automatically; use this template only for manual installs.
+#
+# 1. Copy the binary:   install -m 0755 sbox-panel /usr/local/bin/sbox-panel
+# 2. Create the env file (root-only, keeps the node token out of `ps aux`):
+#      install -m 0600 /dev/null /etc/sbox-agent.env
+#      printf 'SBOX_MASTER=%s\nSBOX_TOKEN=%s\n' 'https://master.example.com:18080/sbox-xxxxxxxx' '<node_token>' > /etc/sbox-agent.env
+# 3. Install & start:   cp sbox-agent.service /etc/systemd/system/ && systemctl daemon-reload \
+#                         && systemctl enable --now sbox-agent
+#
+# Add " --insecure" to ExecStart if the Master uses a self-signed HTTPS certificate.
+
+[Unit]
+Description=sbox-agent - sbox-panel managed node agent
+Documentation=https://github.com/Yan-nian/sbox
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/sbox-agent
+StateDirectory=sbox-agent
+StateDirectoryMode=0750
+EnvironmentFile=-/etc/sbox-agent.env
+ExecStart=/usr/local/bin/sbox-panel agent --data-dir /var/lib/sbox-agent
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=15s
+KillMode=mixed
+
+LimitNOFILE=1048576
+TasksMax=4096
+
+# Allow the managed sing-box core to bind privileged ports (80/443, ACME HTTP-01).
+# Add CAP_NET_ADMIN if you enable a sing-box TUN inbound.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/sbox-agent
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sbox-agent
+
+[Install]
+WantedBy=multi-user.target

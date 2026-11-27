@@ -32,7 +32,12 @@ function levelColor(level: string): string {
   }
 }
 
-export function LogTerminal() {
+interface LogTerminalProps {
+  nodeId: number;
+  offline?: boolean;
+}
+
+export function LogTerminal({ nodeId, offline = false }: LogTerminalProps) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [connected, setConnected] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -47,9 +52,13 @@ export function LogTerminal() {
 
   useEffect(() => {
     let active = true;
+    setLogs([]);
+    setConnected(false);
+
+    if (offline) return;
 
     api
-      .getRecentLogs(200)
+      .getRecentLogs(200, nodeId)
       .then((res) => {
         if (active && Array.isArray(res.logs)) {
           setLogs(res.logs.slice(-MAX_LOG_LINES));
@@ -64,7 +73,7 @@ export function LogTerminal() {
 
     const connect = () => {
       if (!active) return;
-      source = new EventSource(buildSSEUrl("/logs/stream"));
+      source = new EventSource(buildSSEUrl("/logs/stream", nodeId));
       source.onopen = () => setConnected(true);
 
       const handleLog = (ev: MessageEvent) => {
@@ -96,7 +105,7 @@ export function LogTerminal() {
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       source?.close();
     };
-  }, []);
+  }, [nodeId, offline]);
 
   const filtered = useMemo(() => {
     const q = keyword.trim().toLowerCase();
@@ -162,6 +171,7 @@ export function LogTerminal() {
           <Button
             variant={paused ? "primary" : "secondary"}
             size="sm"
+            disabled={offline}
             onClick={() => setPaused((p) => !p)}
           >
             {paused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
@@ -173,9 +183,12 @@ export function LogTerminal() {
             清空
           </Button>
 
-          <Badge tone={connected ? "ok" : "warn"}>
-            <StatusDot state={connected ? "ok" : "warn"} className="h-1.5 w-1.5" />
-            {connected ? "实时流" : "重连中"}
+          <Badge tone={offline ? "neutral" : connected ? "ok" : "warn"}>
+            <StatusDot
+              state={offline ? "idle" : connected ? "ok" : "warn"}
+              className="h-1.5 w-1.5"
+            />
+            {offline ? "节点离线" : connected ? "实时流" : "重连中"}
           </Badge>
         </div>
       </div>
@@ -187,7 +200,11 @@ export function LogTerminal() {
           onScroll={handleScroll}
           className="h-[460px] overflow-y-auto p-3 font-mono text-xs leading-relaxed"
         >
-          {filtered.length === 0 ? (
+          {offline ? (
+            <div className="flex h-full items-center justify-center text-ink-muted">
+              当前远程节点离线，Agent 重连后将自动恢复实时日志推送
+            </div>
+          ) : filtered.length === 0 ? (
             <div className="flex h-full items-center justify-center text-ink-muted">
               {logs.length === 0 ? "等待日志流推送..." : "没有匹配当前筛选条件的日志记录"}
             </div>

@@ -2,11 +2,15 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pause, Play, RefreshCw, Search, Unplug } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { formatBytes, formatRelativeAge } from "@/lib/format";
+import { useNode } from "@/contexts/NodeContext";
 import { useToast } from "@/components/ui/Toast";
 import { Badge, Button, Input, Panel } from "@/components/ui/primitives";
+import { NodeScopeBanner } from "@/components/NodeScopeBanner";
+import type { AppRoute } from "@/components/AppShell";
 import type { ConnectionItem } from "@/types/api";
 
-export function ConnectionsPage() {
+export function ConnectionsPage({ onNavigate }: { onNavigate?: (route: AppRoute) => void }) {
+  const { activeNodeId, activeNode } = useNode();
   const toast = useToast();
   const [connections, setConnections] = useState<ConnectionItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -15,37 +19,48 @@ export function ConnectionsPage() {
   const [search, setSearch] = useState("");
   const [closingId, setClosingId] = useState<string | null>(null);
 
-  const fetchConnections = useCallback(async (silent = false) => {
-    if (!silent) setLoading(true);
-    try {
-      const res = await api.getConnections();
-      setConnections(Array.isArray(res.connections) ? res.connections : []);
-      setError(null);
-    } catch (err) {
-      setError(
-        err instanceof ApiError ? err.message : "无法获取活跃连接（请确认 sing-box 核心运行中）",
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const nodeOffline = activeNode ? !activeNode.online : false;
+
+  const fetchConnections = useCallback(
+    async (silent = false) => {
+      if (nodeOffline) {
+        setConnections([]);
+        setLoading(false);
+        setError(null);
+        return;
+      }
+      if (!silent) setLoading(true);
+      try {
+        const res = await api.getConnections(activeNodeId);
+        setConnections(Array.isArray(res.connections) ? res.connections : []);
+        setError(null);
+      } catch (err) {
+        setError(
+          err instanceof ApiError ? err.message : "无法获取活跃连接（请确认 sing-box 核心运行中）",
+        );
+      } finally {
+        setLoading(false);
+      }
+    },
+    [activeNodeId, nodeOffline],
+  );
 
   useEffect(() => {
     void fetchConnections(false);
   }, [fetchConnections]);
 
   useEffect(() => {
-    if (paused) return;
+    if (paused || nodeOffline) return;
     const timer = window.setInterval(() => {
       void fetchConnections(true);
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [paused, fetchConnections]);
+  }, [paused, nodeOffline, fetchConnections]);
 
   const handleClose = async (conn: ConnectionItem) => {
     setClosingId(conn.id);
     try {
-      await api.closeConnection(conn.id);
+      await api.closeConnection(conn.id, activeNodeId);
       setConnections((prev) => prev.filter((item) => item.id !== conn.id));
       toast.success("已断开连接", conn.destination || conn.id);
     } catch (err) {
@@ -93,6 +108,8 @@ export function ConnectionsPage() {
 
   return (
     <div className="space-y-4">
+      <NodeScopeBanner onNavigate={onNavigate} />
+
       {/* Compact stats summary bar */}
       <div className="grid divide-y divide-hairline overflow-hidden rounded-lg border border-hairline bg-surface sm:grid-cols-4 sm:divide-x sm:divide-y-0">
         <div className="px-4 py-3">

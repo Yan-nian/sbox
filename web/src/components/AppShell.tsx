@@ -1,8 +1,10 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Activity,
   ArrowDown,
   ArrowUp,
+  Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Cpu,
@@ -14,6 +16,7 @@ import {
   Moon,
   Network,
   Radio,
+  Server,
   Settings,
   Shield,
   Sun,
@@ -24,17 +27,19 @@ import { cn } from "@/lib/cn";
 import { formatSpeed } from "@/lib/format";
 import { useTheme } from "@/contexts/ThemeContext";
 import { useAuth } from "@/contexts/AuthContext";
-import { Button, StatusDot } from "@/components/ui/primitives";
+import { useNode } from "@/contexts/NodeContext";
+import { Badge, Button, StatusDot } from "@/components/ui/primitives";
 import type { CoreStatus, MetricsSnapshot } from "@/types/api";
 
 export type AppRoute =
   | "/"
-  | "/core"
-  | "/connections"
-  | "/settings"
+  | "/nodes"
   | "/inbounds"
   | "/members"
   | "/certs"
+  | "/core"
+  | "/connections"
+  | "/settings"
   | "/routing"
   | "/sync";
 
@@ -47,6 +52,7 @@ interface NavItem {
 
 export const ACTIVE_NAV_ITEMS: NavItem[] = [
   { route: "/", label: "仪表盘", icon: Activity },
+  { route: "/nodes", label: "节点管理", icon: Server },
   { route: "/inbounds", label: "入站节点", icon: Radio },
   { route: "/members", label: "成员管理", icon: Users },
   { route: "/certs", label: "证书中心", icon: Shield },
@@ -56,18 +62,19 @@ export const ACTIVE_NAV_ITEMS: NavItem[] = [
 ];
 
 export const ROADMAP_NAV_ITEMS: NavItem[] = [
-  { route: "/routing", label: "出站与分流", icon: GitBranch, milestone: "M3" },
+  { route: "/routing", label: "出站与分流", icon: GitBranch, milestone: "M4" },
   { route: "/sync", label: "订阅与同步", icon: Globe, milestone: "M4" },
 ];
 
 const ROUTE_TITLES: Record<AppRoute, string> = {
   "/": "仪表盘",
-  "/core": "核心与日志",
-  "/connections": "活跃连接",
-  "/settings": "安全与设置",
+  "/nodes": "节点管理",
   "/inbounds": "入站节点",
   "/members": "成员管理",
   "/certs": "证书中心",
+  "/core": "核心与日志",
+  "/connections": "活跃连接",
+  "/settings": "安全与设置",
   "/routing": "出站与分流",
   "/sync": "订阅与同步",
 };
@@ -91,31 +98,61 @@ export function AppShell({
 }: AppShellProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [nodeMenuOpen, setNodeMenuOpen] = useState(false);
+  const nodeMenuRef = useRef<HTMLDivElement | null>(null);
+
   const { theme, toggleTheme } = useTheme();
   const { status, logout } = useAuth();
+  const { nodes, activeNode, activeNodeId, setActiveNodeId } = useNode();
+
+  useEffect(() => {
+    if (!nodeMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (nodeMenuRef.current && !nodeMenuRef.current.contains(e.target as Node)) {
+        setNodeMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setNodeMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [nodeMenuOpen]);
 
   const handleSelect = (target: AppRoute) => {
     onNavigate(target);
     setMobileOpen(false);
   };
 
-  const coreState = core?.upgrading
-    ? "warn"
-    : core?.running
-      ? "ok"
-      : core?.last_error
-        ? "danger"
-        : "idle";
+  const nodeOffline = activeNode ? !activeNode.online : false;
 
-  const coreLabel = core?.upgrading
-    ? "核心升级中"
-    : core?.running
-      ? core.version
-        ? `运行中 · ${core.version}`
-        : "运行中"
-      : core?.binary_exists === false
-        ? "未安装核心"
-        : "已停止";
+  const coreState = nodeOffline
+    ? "idle"
+    : core?.upgrading
+      ? "warn"
+      : core?.running
+        ? "ok"
+        : core?.last_error
+          ? "danger"
+          : "idle";
+
+  const coreLabel = nodeOffline
+    ? "节点离线"
+    : core?.upgrading
+      ? "核心升级中"
+      : core?.running
+        ? core.version
+          ? `运行中 · ${core.version}`
+          : "运行中"
+        : core?.binary_exists === false
+          ? "未安装核心"
+          : "已停止";
+
+  const onlineCount = nodes.filter((n) => n.online).length;
 
   const renderSidebarContent = (isCompact: boolean) => (
     <div className="flex h-full flex-col">
@@ -155,7 +192,9 @@ export function AppShell({
                 sbox-panel
               </div>
               <div className="truncate font-mono text-[10px] text-ink-muted">
-                sing-box 1.12+
+                {nodes.length > 1
+                  ? `多机集群 · ${onlineCount}/${nodes.length} 在线`
+                  : "sing-box 1.12+"}
               </div>
             </div>
           )}
@@ -193,15 +232,22 @@ export function AppShell({
                   onClick={() => handleSelect(item.route)}
                   title={isCompact ? item.label : undefined}
                   className={cn(
-                    "flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors",
+                    "flex w-full items-center justify-between gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors",
                     isCompact && "justify-center px-0",
                     active
                       ? "bg-accent-muted font-medium text-accent"
                       : "text-ink-secondary hover:bg-surface-hover hover:text-ink",
                   )}
                 >
-                  <Icon className="h-4 w-4 shrink-0" />
-                  {!isCompact && <span className="truncate">{item.label}</span>}
+                  <span className="flex items-center gap-2.5 truncate">
+                    <Icon className="h-4 w-4 shrink-0" />
+                    {!isCompact && <span className="truncate">{item.label}</span>}
+                  </span>
+                  {!isCompact && item.route === "/nodes" && nodes.length > 0 && (
+                    <span className="rounded border border-hairline bg-recessed px-1.5 py-0.2 font-mono text-[10px] text-ink-secondary tabular-nums">
+                      {onlineCount}/{nodes.length}
+                    </span>
+                  )}
                 </button>
               );
             })}
@@ -338,7 +384,7 @@ export function AppShell({
       {/* Main viewport */}
       <div className="flex min-w-0 flex-1 flex-col">
         {/* Top instrument utility strip */}
-        <header className="sticky top-0 z-20 flex h-14 items-center justify-between gap-3 border-b border-hairline bg-surface/95 px-4 backdrop-blur-sm sm:px-6">
+        <header className="sticky top-0 z-20 flex h-14 items-center justify-between gap-2.5 border-b border-hairline bg-surface/95 px-4 backdrop-blur-sm sm:px-6">
           <div className="flex min-w-0 items-center gap-3">
             <button
               type="button"
@@ -351,17 +397,119 @@ export function AppShell({
             <h1 className="truncate text-sm font-semibold text-ink sm:text-base">
               {ROUTE_TITLES[route]}
             </h1>
+
+            {/* Node Context Switcher */}
+            {activeNode && (
+              <div ref={nodeMenuRef} className="relative">
+                <button
+                  type="button"
+                  onClick={() => setNodeMenuOpen((o) => !o)}
+                  className={cn(
+                    "inline-flex items-center gap-2 rounded-md border px-2.5 py-1 text-xs transition-colors",
+                    nodeMenuOpen
+                      ? "border-accent bg-accent-muted text-ink"
+                      : "border-hairline bg-recessed text-ink hover:border-hairline-strong",
+                  )}
+                  aria-expanded={nodeMenuOpen}
+                  aria-haspopup="listbox"
+                >
+                  <StatusDot state={activeNode.online ? "ok" : "idle"} />
+                  <span className="max-w-[110px] truncate font-mono font-medium sm:max-w-[150px]">
+                    {activeNode.name}
+                  </span>
+                  <span className="hidden rounded border border-hairline bg-surface px-1 py-0.2 font-mono text-[10px] text-ink-secondary sm:inline">
+                    {activeNode.is_local ? "本机" : "远端"}
+                  </span>
+                  <ChevronDown className="h-3.5 w-3.5 text-ink-muted" />
+                </button>
+
+                {nodeMenuOpen && (
+                  <div
+                    role="listbox"
+                    className="absolute left-0 top-full z-40 mt-1.5 w-72 overflow-hidden rounded-lg border border-hairline-strong bg-surface shadow-2xl"
+                  >
+                    <div className="flex items-center justify-between border-b border-hairline bg-recessed px-3 py-2 text-[11px] text-ink-secondary">
+                      <span>切换受控节点</span>
+                      <span className="font-mono tabular-nums">
+                        {onlineCount}/{nodes.length} 在线
+                      </span>
+                    </div>
+
+                    <div className="max-h-64 overflow-y-auto p-1">
+                      {nodes.map((n) => {
+                        const selected = n.id === activeNodeId;
+                        return (
+                          <button
+                            key={n.id}
+                            type="button"
+                            role="option"
+                            aria-selected={selected}
+                            onClick={() => {
+                              setActiveNodeId(n.id);
+                              setNodeMenuOpen(false);
+                            }}
+                            className={cn(
+                              "flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-2 text-left text-xs transition-colors",
+                              selected
+                                ? "bg-accent-muted text-ink"
+                                : "hover:bg-surface-hover text-ink-secondary hover:text-ink",
+                            )}
+                          >
+                            <div className="flex min-w-0 items-center gap-2">
+                              <StatusDot state={n.online ? "ok" : "idle"} />
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="truncate font-mono font-medium text-ink">
+                                    {n.name}
+                                  </span>
+                                  <Badge
+                                    tone={n.is_local ? "accent" : "neutral"}
+                                    className="px-1 py-0 text-[10px]"
+                                  >
+                                    {n.is_local ? "本机" : "远端"}
+                                  </Badge>
+                                </div>
+                                <div className="mt-0.5 truncate font-mono text-[10px] text-ink-muted">
+                                  {n.online
+                                    ? `${n.os || "?"}/${n.arch || "?"} · ${n.core_version || "无核心"}`
+                                    : "Agent 离线"}
+                                </div>
+                              </div>
+                            </div>
+                            {selected && <Check className="h-3.5 w-3.5 shrink-0 text-accent" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="border-t border-hairline bg-recessed/70 p-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNodeMenuOpen(false);
+                          handleSelect("/nodes");
+                        }}
+                        className="flex w-full items-center justify-center gap-1.5 rounded px-2 py-1.5 text-xs font-medium text-accent hover:bg-surface"
+                      >
+                        <Server className="h-3.5 w-3.5" />
+                        节点管理与添加远程 VPS
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3">
             {/* Compact live speed pill */}
-            <div className="hidden items-center gap-3 rounded-md border border-hairline bg-recessed px-2.5 py-1 font-mono text-xs tabular-nums md:flex">
-              <span className="flex items-center gap-1 text-uplink" title="实时上行速率">
+            <div className="hidden items-center gap-3 rounded-md border border-hairline bg-recessed px-2.5 py-1 font-mono text-xs tabular-nums xl:flex">
+              <span className="flex items-center gap-1 text-uplink" title="当前节点实时上行速率">
                 <ArrowUp className="h-3 w-3" />
                 {formatSpeed(metrics?.up_speed)}
               </span>
               <span className="h-3 w-px bg-hairline" />
-              <span className="flex items-center gap-1 text-accent" title="实时下行速率">
+              <span className="flex items-center gap-1 text-accent" title="当前节点实时下行速率">
                 <ArrowDown className="h-3 w-3" />
                 {formatSpeed(metrics?.down_speed)}
               </span>
@@ -379,7 +527,7 @@ export function AppShell({
             <button
               type="button"
               onClick={() => handleSelect("/core")}
-              className="flex items-center gap-2 rounded-md border border-hairline bg-recessed px-2.5 py-1 text-xs text-ink hover:border-hairline-strong"
+              className="hidden items-center gap-2 rounded-md border border-hairline bg-recessed px-2.5 py-1 text-xs text-ink hover:border-hairline-strong sm:flex"
             >
               <StatusDot state={coreState} />
               <span className="max-w-[140px] truncate font-mono">{coreLabel}</span>

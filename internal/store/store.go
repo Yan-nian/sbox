@@ -108,7 +108,7 @@ func (s *Store) Path() string {
 	return s.path
 }
 
-// Migrate applies all pending SQLite schema migrations idempotently.
+// Migrate applies all pending SQLite schema migrations idempotently, including Milestone 3 multi-node upgrades.
 func (s *Store) Migrate(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -147,7 +147,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("commit migration %d: %w", m.Version, err)
 		}
 	}
-	return nil
+
+	return s.ensureMilestone3Schema(ctx)
 }
 
 // TableNames returns all user table names in SQLite (excluding sqlite_* internal tables).
@@ -348,6 +349,13 @@ func (s *Store) EnsureBootstrapDefaults(ctx context.Context, defaultPort int) (b
 			return "", "", "", err
 		}
 	}
+
+	// Keep local master node (id=1) name aligned with bootstrapped instance_id on fresh DBs.
+	_, _ = s.db.ExecContext(ctx, `
+		UPDATE nodes SET name = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = 1 AND (name = '' OR name = 'local-master')
+	`, instanceID)
+
 	return basePath, instanceID, jwtSecret, nil
 }
 
@@ -398,7 +406,7 @@ func (s *Store) GetPanelSettings(ctx context.Context) (model.PanelSettings, erro
 	}, nil
 }
 
-// UpdatePanelSettings persists editable PanelSettings fields atomically.
+// UpdatePanelSettings persists editable PanelSettings fields atomically and keeps local node id=1 in sync.
 func (s *Store) UpdatePanelSettings(ctx context.Context, ps model.PanelSettings) error {
 	updates := map[string]string{
 		model.SettingPublicIPv4:     strings.TrimSpace(ps.PublicIPv4),
@@ -418,7 +426,24 @@ func (s *Store) UpdatePanelSettings(ctx context.Context, ps model.PanelSettings)
 	if ll := strings.TrimSpace(ps.LogLevel); ll != "" {
 		updates[model.SettingLogLevel] = ll
 	}
-	return s.SetSettings(ctx, updates)
+	if err := s.SetSettings(ctx, updates); err != nil {
+		return err
+	}
+
+	// Keep local node id=1 synced with panel-level settings.
+	if local, err := s.GetNode(ctx, 1); err == nil {
+		if id := strings.TrimSpace(ps.InstanceID); id != "" {
+			local.Name = id
+		}
+		local.PublicIPv4 = strings.TrimSpace(ps.PublicIPv4)
+		local.PublicIPv6 = strings.TrimSpace(ps.PublicIPv6)
+		local.GithubProxy = strings.TrimSpace(ps.GithubProxy)
+		if ll := strings.TrimSpace(ps.LogLevel); ll != "" {
+			local.LogLevel = ll
+		}
+		_ = s.UpdateNode(ctx, local)
+	}
+	return nil
 }
 
 // --- Certificates CRUD ---
@@ -444,15 +469,18 @@ func scanCertificate(scanner interface{ Scan(dest ...any) error }) (*model.Certi
 	var notBefore, notAfter, expiresAt sql.NullTime
 	var autoRenew, acmeStaging int
 	err := scanner.Scan(
-		&c.ID, &c.Name, &primaryDomain, &c.Type, &domainsJSON,
+		&c.ID, &c.NodeID, &c.Name, &primaryDomain, &c.Type, &domainsJSON,
 		&c.ACMEEmail, &c.ACMEHTTPPort, &acmeStaging,
 		&c.DNSProvider, &c.DNSCredsJSON,
-		&c.CertPath, &c.KeyPath, &c.Issuer, &c.Fingerprint,
+		&c.CertPath, &c.KeyPath, &c.CertPEM, &c.KeyPEM, &c.Issuer, &c.Fingerprint,
 		&notBefore, &notAfter, &expiresAt, &autoRenew, &c.LastError,
 		&c.CreatedAt, &c.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if c.NodeID <= 0 {
+		c.NodeID = 1
 	}
 	c.AutoRenew = autoRenew != 0
 	c.ACMEStaging = acmeStaging != 0
@@ -479,32 +507,35 @@ func scanCertificate(scanner interface{ Scan(dest ...any) error }) (*model.Certi
 }
 
 const certSelectColumns = `
-	id, name, domain, cert_type, domains_json,
+	id, node_id, name, domain, cert_type, domains_json,
 	acme_email, acme_http_port, acme_staging,
 	dns_provider, dns_credentials_enc,
-	cert_path, key_path, issuer, fingerprint,
+	cert_path, key_path, cert_pem, key_pem, issuer, fingerprint,
 	not_before, not_after, expires_at, auto_renew, last_renew_error,
 	created_at, updated_at
 `
 
 func (s *Store) CreateCertificate(ctx context.Context, c *model.Certificate) error {
+	if c.NodeID <= 0 {
+		c.NodeID = 1
+	}
 	primary, domainsJSON := marshalDomains(c.Domains)
 	if c.ACMEHTTPPort == "" {
 		c.ACMEHTTPPort = "80"
 	}
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO certificates (
-			name, domain, cert_type, domains_json,
+			node_id, name, domain, cert_type, domains_json,
 			acme_email, acme_http_port, acme_staging,
 			dns_provider, dns_credentials_enc,
-			cert_path, key_path, issuer, fingerprint,
+			cert_path, key_path, cert_pem, key_pem, issuer, fingerprint,
 			not_before, not_after, expires_at, auto_renew, last_renew_error
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		c.Name, primary, c.Type, domainsJSON,
+		c.NodeID, c.Name, primary, c.Type, domainsJSON,
 		c.ACMEEmail, c.ACMEHTTPPort, boolToInt(c.ACMEStaging),
 		c.DNSProvider, c.DNSCredsJSON,
-		c.CertPath, c.KeyPath, c.Issuer, c.Fingerprint,
+		c.CertPath, c.KeyPath, c.CertPEM, c.KeyPEM, c.Issuer, c.Fingerprint,
 		c.NotBefore, c.NotAfter, c.NotAfter, boolToInt(c.AutoRenew), c.LastError,
 	)
 	if err != nil {
@@ -531,8 +562,17 @@ func (s *Store) GetCertificate(ctx context.Context, id int64) (*model.Certificat
 	return c, err
 }
 
-func (s *Store) ListCertificates(ctx context.Context) ([]model.Certificate, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+certSelectColumns+` FROM certificates ORDER BY id ASC`)
+// ListCertificates lists certificates for nodeID, or across all nodes when nodeID <= 0.
+func (s *Store) ListCertificates(ctx context.Context, nodeID int64) ([]model.Certificate, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if nodeID > 0 {
+		rows, err = s.db.QueryContext(ctx, `SELECT `+certSelectColumns+` FROM certificates WHERE node_id = ? ORDER BY id ASC`, nodeID)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `SELECT `+certSelectColumns+` FROM certificates ORDER BY node_id ASC, id ASC`)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -550,24 +590,27 @@ func (s *Store) ListCertificates(ctx context.Context) ([]model.Certificate, erro
 }
 
 func (s *Store) UpdateCertificate(ctx context.Context, c *model.Certificate) error {
+	if c.NodeID <= 0 {
+		c.NodeID = 1
+	}
 	primary, domainsJSON := marshalDomains(c.Domains)
 	if c.ACMEHTTPPort == "" {
 		c.ACMEHTTPPort = "80"
 	}
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE certificates SET
-			name = ?, domain = ?, cert_type = ?, domains_json = ?,
+			node_id = ?, name = ?, domain = ?, cert_type = ?, domains_json = ?,
 			acme_email = ?, acme_http_port = ?, acme_staging = ?,
 			dns_provider = ?, dns_credentials_enc = ?,
-			cert_path = ?, key_path = ?, issuer = ?, fingerprint = ?,
+			cert_path = ?, key_path = ?, cert_pem = ?, key_pem = ?, issuer = ?, fingerprint = ?,
 			not_before = ?, not_after = ?, expires_at = ?, auto_renew = ?, last_renew_error = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`,
-		c.Name, primary, c.Type, domainsJSON,
+		c.NodeID, c.Name, primary, c.Type, domainsJSON,
 		c.ACMEEmail, c.ACMEHTTPPort, boolToInt(c.ACMEStaging),
 		c.DNSProvider, c.DNSCredsJSON,
-		c.CertPath, c.KeyPath, c.Issuer, c.Fingerprint,
+		c.CertPath, c.KeyPath, c.CertPEM, c.KeyPEM, c.Issuer, c.Fingerprint,
 		c.NotBefore, c.NotAfter, c.NotAfter, boolToInt(c.AutoRenew), c.LastError,
 		c.ID,
 	)
@@ -744,7 +787,7 @@ func (s *Store) DeleteMember(ctx context.Context, id int64) error {
 // --- Inbounds CRUD ---
 
 const inboundSelectColumns = `
-	id, name, tag, protocol, enabled, listen, listen_port, config_json,
+	id, node_id, name, tag, protocol, enabled, listen, listen_port, config_json,
 	certificate_id, member_bind_mode, member_ids_json,
 	external_host, external_port, external_entries_json,
 	upload_bytes, download_bytes, created_at, updated_at
@@ -756,7 +799,7 @@ func scanInbound(scanner interface{ Scan(dest ...any) error }) (*model.Inbound, 
 	var certID sql.NullInt64
 	var cfgJSON, memberIDsJSON, extraEntriesJSON string
 	err := scanner.Scan(
-		&in.ID, &in.Name, &in.Tag, &in.Protocol, &enabled,
+		&in.ID, &in.NodeID, &in.Name, &in.Tag, &in.Protocol, &enabled,
 		&in.Listen, &in.ListenPort, &cfgJSON,
 		&certID, &in.MemberMode, &memberIDsJSON,
 		&in.ExternalHost, &in.ExternalPort, &extraEntriesJSON,
@@ -764,6 +807,9 @@ func scanInbound(scanner interface{ Scan(dest ...any) error }) (*model.Inbound, 
 	)
 	if err != nil {
 		return nil, err
+	}
+	if in.NodeID <= 0 {
+		in.NodeID = 1
 	}
 	in.Enabled = enabled != 0
 	if certID.Valid {
@@ -790,6 +836,9 @@ func scanInbound(scanner interface{ Scan(dest ...any) error }) (*model.Inbound, 
 }
 
 func normalizeInboundDefaults(in *model.Inbound) (cfgJSON, memberIDsJSON, extraEntriesJSON string) {
+	if in.NodeID <= 0 {
+		in.NodeID = 1
+	}
 	if strings.TrimSpace(in.Listen) == "" {
 		in.Listen = "::"
 	}
@@ -818,12 +867,12 @@ func (s *Store) CreateInbound(ctx context.Context, in *model.Inbound) error {
 	cfgJSON, memberIDsJSON, extraEntriesJSON := normalizeInboundDefaults(in)
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO inbounds (
-			name, tag, protocol, enabled, listen, listen_port, config_json,
+			node_id, name, tag, protocol, enabled, listen, listen_port, config_json,
 			certificate_id, member_bind_mode, member_ids_json,
 			external_host, external_port, external_entries_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		in.Name, in.Tag, in.Protocol, boolToInt(in.Enabled), in.Listen, in.ListenPort, cfgJSON,
+		in.NodeID, in.Name, in.Tag, in.Protocol, boolToInt(in.Enabled), in.Listen, in.ListenPort, cfgJSON,
 		in.CertificateID, in.MemberMode, memberIDsJSON,
 		in.ExternalHost, in.ExternalPort, extraEntriesJSON,
 	)
@@ -850,8 +899,11 @@ func (s *Store) GetInbound(ctx context.Context, id int64) (*model.Inbound, error
 	return in, err
 }
 
-func (s *Store) GetInboundByTag(ctx context.Context, tag string) (*model.Inbound, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+inboundSelectColumns+` FROM inbounds WHERE tag = ?`, tag)
+func (s *Store) GetInboundByTag(ctx context.Context, nodeID int64, tag string) (*model.Inbound, error) {
+	if nodeID <= 0 {
+		nodeID = 1
+	}
+	row := s.db.QueryRowContext(ctx, `SELECT `+inboundSelectColumns+` FROM inbounds WHERE node_id = ? AND tag = ?`, nodeID, tag)
 	in, err := scanInbound(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -859,8 +911,17 @@ func (s *Store) GetInboundByTag(ctx context.Context, tag string) (*model.Inbound
 	return in, err
 }
 
-func (s *Store) ListInbounds(ctx context.Context) ([]model.Inbound, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+inboundSelectColumns+` FROM inbounds ORDER BY id ASC`)
+// ListInbounds lists inbounds for nodeID, or across all nodes when nodeID <= 0.
+func (s *Store) ListInbounds(ctx context.Context, nodeID int64) ([]model.Inbound, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if nodeID > 0 {
+		rows, err = s.db.QueryContext(ctx, `SELECT `+inboundSelectColumns+` FROM inbounds WHERE node_id = ? ORDER BY id ASC`, nodeID)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `SELECT `+inboundSelectColumns+` FROM inbounds ORDER BY node_id ASC, id ASC`)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -881,13 +942,13 @@ func (s *Store) UpdateInbound(ctx context.Context, in *model.Inbound) error {
 	cfgJSON, memberIDsJSON, extraEntriesJSON := normalizeInboundDefaults(in)
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE inbounds SET
-			name = ?, tag = ?, protocol = ?, enabled = ?, listen = ?, listen_port = ?, config_json = ?,
+			node_id = ?, name = ?, tag = ?, protocol = ?, enabled = ?, listen = ?, listen_port = ?, config_json = ?,
 			certificate_id = ?, member_bind_mode = ?, member_ids_json = ?,
 			external_host = ?, external_port = ?, external_entries_json = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`,
-		in.Name, in.Tag, in.Protocol, boolToInt(in.Enabled), in.Listen, in.ListenPort, cfgJSON,
+		in.NodeID, in.Name, in.Tag, in.Protocol, boolToInt(in.Enabled), in.Listen, in.ListenPort, cfgJSON,
 		in.CertificateID, in.MemberMode, memberIDsJSON,
 		in.ExternalHost, in.ExternalPort, extraEntriesJSON,
 		in.ID,
@@ -936,9 +997,9 @@ func (s *Store) CreateUpstreamSub(ctx context.Context, u *model.UpstreamSub) err
 		u.CachedNodesJSON = "[]"
 	}
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO upstream_subs (name, url, enabled, update_cron, include_regex, exclude_regex, selector_tag, urltest_tag, cached_nodes_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, u.Name, u.URL, boolToInt(u.Enabled), u.UpdateCron, u.IncludeRegex, u.ExcludeRegex, u.SelectorTag, u.URLTestTag, u.CachedNodesJSON)
+		INSERT INTO upstream_subs (node_id, name, url, enabled, update_cron, include_regex, exclude_regex, selector_tag, urltest_tag, cached_nodes_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, u.NodeID, u.Name, u.URL, boolToInt(u.Enabled), u.UpdateCron, u.IncludeRegex, u.ExcludeRegex, u.SelectorTag, u.URLTestTag, u.CachedNodesJSON)
 	if err != nil {
 		return err
 	}
@@ -952,7 +1013,7 @@ func (s *Store) CreateUpstreamSub(ctx context.Context, u *model.UpstreamSub) err
 
 func (s *Store) ListUpstreamSubs(ctx context.Context) ([]model.UpstreamSub, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, url, enabled, update_cron, include_regex, exclude_regex, selector_tag, urltest_tag, cached_nodes_json, last_fetch_status, last_fetch_error, last_fetched_at, created_at, updated_at
+		SELECT id, node_id, name, url, enabled, update_cron, include_regex, exclude_regex, selector_tag, urltest_tag, cached_nodes_json, last_fetch_status, last_fetch_error, last_fetched_at, created_at, updated_at
 		FROM upstream_subs ORDER BY id ASC
 	`)
 	if err != nil {
@@ -965,7 +1026,7 @@ func (s *Store) ListUpstreamSubs(ctx context.Context) ([]model.UpstreamSub, erro
 		var u model.UpstreamSub
 		var enabled int
 		var fetched sql.NullTime
-		if err := rows.Scan(&u.ID, &u.Name, &u.URL, &enabled, &u.UpdateCron, &u.IncludeRegex, &u.ExcludeRegex, &u.SelectorTag, &u.URLTestTag, &u.CachedNodesJSON, &u.LastFetchStatus, &u.LastFetchError, &fetched, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.NodeID, &u.Name, &u.URL, &enabled, &u.UpdateCron, &u.IncludeRegex, &u.ExcludeRegex, &u.SelectorTag, &u.URLTestTag, &u.CachedNodesJSON, &u.LastFetchStatus, &u.LastFetchError, &fetched, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
 		u.Enabled = enabled != 0
@@ -979,13 +1040,16 @@ func (s *Store) ListUpstreamSubs(ctx context.Context) ([]model.UpstreamSub, erro
 }
 
 func (s *Store) CreateOutboundExtra(ctx context.Context, o *model.OutboundExtra) error {
+	if o.NodeID <= 0 {
+		o.NodeID = 1
+	}
 	if o.ConfigJSON == "" {
 		o.ConfigJSON = "{}"
 	}
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO outbounds_extra (name, tag, kind, enabled, config_json)
-		VALUES (?, ?, ?, ?, ?)
-	`, o.Name, o.Tag, o.Kind, boolToInt(o.Enabled), o.ConfigJSON)
+		INSERT INTO outbounds_extra (node_id, name, tag, kind, enabled, config_json)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, o.NodeID, o.Name, o.Tag, o.Kind, boolToInt(o.Enabled), o.ConfigJSON)
 	if err != nil {
 		return err
 	}
@@ -997,11 +1061,22 @@ func (s *Store) CreateOutboundExtra(ctx context.Context, o *model.OutboundExtra)
 	return nil
 }
 
-func (s *Store) ListOutboundsExtra(ctx context.Context) ([]model.OutboundExtra, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, tag, kind, enabled, config_json, created_at, updated_at
-		FROM outbounds_extra ORDER BY id ASC
-	`)
+func (s *Store) ListOutboundsExtra(ctx context.Context, nodeID int64) ([]model.OutboundExtra, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if nodeID > 0 {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT id, node_id, name, tag, kind, enabled, config_json, created_at, updated_at
+			FROM outbounds_extra WHERE node_id = ? ORDER BY id ASC
+		`, nodeID)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT id, node_id, name, tag, kind, enabled, config_json, created_at, updated_at
+			FROM outbounds_extra ORDER BY node_id ASC, id ASC
+		`)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1011,7 +1086,7 @@ func (s *Store) ListOutboundsExtra(ctx context.Context) ([]model.OutboundExtra, 
 	for rows.Next() {
 		var o model.OutboundExtra
 		var enabled int
-		if err := rows.Scan(&o.ID, &o.Name, &o.Tag, &o.Kind, &enabled, &o.ConfigJSON, &o.CreatedAt, &o.UpdatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.NodeID, &o.Name, &o.Tag, &o.Kind, &enabled, &o.ConfigJSON, &o.CreatedAt, &o.UpdatedAt); err != nil {
 			return nil, err
 		}
 		o.Enabled = enabled != 0
@@ -1021,6 +1096,9 @@ func (s *Store) ListOutboundsExtra(ctx context.Context) ([]model.OutboundExtra, 
 }
 
 func (s *Store) CreateRouteRule(ctx context.Context, r *model.RouteRule) error {
+	if r.NodeID <= 0 {
+		r.NodeID = 1
+	}
 	if r.MatchJSON == "" {
 		r.MatchJSON = "{}"
 	}
@@ -1031,9 +1109,9 @@ func (s *Store) CreateRouteRule(ctx context.Context, r *model.RouteRule) error {
 		r.Action = "route"
 	}
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO route_rules (name, priority, preset_type, match_json, action, outbound_tag, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, r.Name, r.Priority, r.PresetType, r.MatchJSON, r.Action, r.OutboundTag, boolToInt(r.Enabled))
+		INSERT INTO route_rules (node_id, name, priority, preset_type, match_json, action, outbound_tag, enabled)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, r.NodeID, r.Name, r.Priority, r.PresetType, r.MatchJSON, r.Action, r.OutboundTag, boolToInt(r.Enabled))
 	if err != nil {
 		return err
 	}
@@ -1045,11 +1123,22 @@ func (s *Store) CreateRouteRule(ctx context.Context, r *model.RouteRule) error {
 	return nil
 }
 
-func (s *Store) ListRouteRules(ctx context.Context) ([]model.RouteRule, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, priority, preset_type, match_json, action, outbound_tag, enabled, created_at, updated_at
-		FROM route_rules ORDER BY priority ASC, id ASC
-	`)
+func (s *Store) ListRouteRules(ctx context.Context, nodeID int64) ([]model.RouteRule, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if nodeID > 0 {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT id, node_id, name, priority, preset_type, match_json, action, outbound_tag, enabled, created_at, updated_at
+			FROM route_rules WHERE node_id = ? ORDER BY priority ASC, id ASC
+		`, nodeID)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT id, node_id, name, priority, preset_type, match_json, action, outbound_tag, enabled, created_at, updated_at
+			FROM route_rules ORDER BY node_id ASC, priority ASC, id ASC
+		`)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1059,7 +1148,7 @@ func (s *Store) ListRouteRules(ctx context.Context) ([]model.RouteRule, error) {
 	for rows.Next() {
 		var r model.RouteRule
 		var enabled int
-		if err := rows.Scan(&r.ID, &r.Name, &r.Priority, &r.PresetType, &r.MatchJSON, &r.Action, &r.OutboundTag, &enabled, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.NodeID, &r.Name, &r.Priority, &r.PresetType, &r.MatchJSON, &r.Action, &r.OutboundTag, &enabled, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		r.Enabled = enabled != 0
@@ -1120,10 +1209,13 @@ func (s *Store) ListSyncTargets(ctx context.Context) ([]model.SyncTarget, error)
 
 // --- Traffic Stats ---
 
-// RecordTrafficDeltas upserts hourly and daily traffic buckets and increments member/inbound totals.
-func (s *Store) RecordTrafficDeltas(ctx context.Context, now time.Time, deltas []TrafficDeltaInput) error {
+// RecordTrafficDeltas upserts hourly and daily traffic buckets scoped to nodeID and increments member/inbound totals.
+func (s *Store) RecordTrafficDeltas(ctx context.Context, nodeID int64, now time.Time, deltas []TrafficDeltaInput) error {
 	if len(deltas) == 0 {
 		return nil
+	}
+	if nodeID <= 0 {
+		nodeID = 1
 	}
 	nowUTC := now.UTC()
 	hourBucket := time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day(), nowUTC.Hour(), 0, 0, 0, time.UTC)
@@ -1135,13 +1227,14 @@ func (s *Store) RecordTrafficDeltas(ctx context.Context, now time.Time, deltas [
 	}
 
 	upsertStmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO traffic_stats (member_id, inbound_id, member_name, inbound_tag, granularity, bucket_time, upload_bytes, download_bytes)
+		INSERT INTO traffic_stats (node_id, member_id, inbound_id, member_name, inbound_tag, granularity, bucket_time, upload_bytes, download_bytes)
 		VALUES (
+			?,
 			(SELECT id FROM members WHERE name = ? LIMIT 1),
-			(SELECT id FROM inbounds WHERE tag = ? LIMIT 1),
+			(SELECT id FROM inbounds WHERE node_id = ? AND tag = ? LIMIT 1),
 			?, ?, ?, ?, ?, ?
 		)
-		ON CONFLICT(member_name, inbound_tag, granularity, bucket_time) DO UPDATE SET
+		ON CONFLICT(node_id, member_name, inbound_tag, granularity, bucket_time) DO UPDATE SET
 			member_id = COALESCE(traffic_stats.member_id, excluded.member_id),
 			inbound_id = COALESCE(traffic_stats.inbound_id, excluded.inbound_id),
 			upload_bytes = traffic_stats.upload_bytes + excluded.upload_bytes,
@@ -1165,7 +1258,7 @@ func (s *Store) RecordTrafficDeltas(ctx context.Context, now time.Time, deltas [
 
 	inboundUpd, err := tx.PrepareContext(ctx, `
 		UPDATE inbounds SET upload_bytes = upload_bytes + ?, download_bytes = download_bytes + ?, updated_at = CURRENT_TIMESTAMP
-		WHERE tag = ?
+		WHERE node_id = ? AND tag = ?
 	`)
 	if err != nil {
 		_ = tx.Rollback()
@@ -1179,11 +1272,11 @@ func (s *Store) RecordTrafficDeltas(ctx context.Context, now time.Time, deltas [
 		}
 		// Normalize ShadowTLS detour tags back to the parent inbound tag if present
 		inboundTag := strings.TrimSuffix(d.InboundTag, "-detour")
-		if _, err := upsertStmt.ExecContext(ctx, d.MemberName, inboundTag, d.MemberName, inboundTag, "hour", hourBucket, d.Upload, d.Download); err != nil {
+		if _, err := upsertStmt.ExecContext(ctx, nodeID, d.MemberName, nodeID, inboundTag, d.MemberName, inboundTag, "hour", hourBucket, d.Upload, d.Download); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
-		if _, err := upsertStmt.ExecContext(ctx, d.MemberName, inboundTag, d.MemberName, inboundTag, "day", dayBucket, d.Upload, d.Download); err != nil {
+		if _, err := upsertStmt.ExecContext(ctx, nodeID, d.MemberName, nodeID, inboundTag, d.MemberName, inboundTag, "day", dayBucket, d.Upload, d.Download); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
@@ -1194,7 +1287,7 @@ func (s *Store) RecordTrafficDeltas(ctx context.Context, now time.Time, deltas [
 			}
 		}
 		if inboundTag != "" {
-			if _, err := inboundUpd.ExecContext(ctx, d.Upload, d.Download, inboundTag); err != nil {
+			if _, err := inboundUpd.ExecContext(ctx, d.Upload, d.Download, nodeID, inboundTag); err != nil {
 				_ = tx.Rollback()
 				return err
 			}
@@ -1212,7 +1305,7 @@ func (s *Store) ListTrafficStats(ctx context.Context, granularity string, since 
 		limit = 200
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, member_id, inbound_id, member_name, inbound_tag, granularity, bucket_time, upload_bytes, download_bytes
+		SELECT id, node_id, member_id, inbound_id, member_name, inbound_tag, granularity, bucket_time, upload_bytes, download_bytes
 		FROM traffic_stats
 		WHERE granularity = ? AND bucket_time >= ?
 		ORDER BY bucket_time ASC
@@ -1227,7 +1320,7 @@ func (s *Store) ListTrafficStats(ctx context.Context, granularity string, since 
 	for rows.Next() {
 		var ts model.TrafficStat
 		var mID, iID sql.NullInt64
-		if err := rows.Scan(&ts.ID, &mID, &iID, &ts.MemberName, &ts.InboundTag, &ts.Granularity, &ts.BucketTime, &ts.UploadBytes, &ts.DownloadBytes); err != nil {
+		if err := rows.Scan(&ts.ID, &ts.NodeID, &mID, &iID, &ts.MemberName, &ts.InboundTag, &ts.Granularity, &ts.BucketTime, &ts.UploadBytes, &ts.DownloadBytes); err != nil {
 			return nil, err
 		}
 		if mID.Valid {
@@ -1244,8 +1337,8 @@ func (s *Store) ListTrafficStats(ctx context.Context, granularity string, since 
 }
 
 // GetTrafficStats queries aggregated time-series buckets (24h hourly, 7d/30d daily)
-// along with per-member and per-inbound traffic breakdowns.
-func (s *Store) GetTrafficStats(ctx context.Context, rangeKey string, memberID, inboundID int64) (model.TrafficStatsResponse, error) {
+// along with per-member, per-inbound, and per-node traffic breakdowns.
+func (s *Store) GetTrafficStats(ctx context.Context, rangeKey string, nodeID, memberID, inboundID int64) (model.TrafficStatsResponse, error) {
 	now := time.Now().UTC()
 	var granularity string
 	var since time.Time
@@ -1270,6 +1363,7 @@ func (s *Store) GetTrafficStats(ctx context.Context, rangeKey string, memberID, 
 		Series:    make([]model.TrafficSeriesPoint, 0),
 		ByMember:  make([]model.MemberTrafficItem, 0),
 		ByInbound: make([]model.InboundTrafficItem, 0),
+		ByNode:    make([]model.NodeTrafficItem, 0),
 	}
 
 	// Build filtered time series query
@@ -1277,6 +1371,10 @@ func (s *Store) GetTrafficStats(ctx context.Context, rangeKey string, memberID, 
 	var args []any
 	where = append(where, "granularity = ?", "bucket_time >= ?")
 	args = append(args, granularity, since)
+	if nodeID > 0 {
+		where = append(where, "node_id = ?")
+		args = append(args, nodeID)
+	}
 	if memberID > 0 {
 		where = append(where, "member_id = ?")
 		args = append(args, memberID)
@@ -1339,11 +1437,19 @@ func (s *Store) GetTrafficStats(ctx context.Context, rangeKey string, memberID, 
 	_ = mRows.Close()
 
 	// By inbound breakdown
-	iQuery := `SELECT id, name, tag, protocol, upload_bytes, download_bytes FROM inbounds`
+	iQuery := `SELECT id, node_id, name, tag, protocol, upload_bytes, download_bytes FROM inbounds`
+	var iConds []string
 	var iArgs []any
+	if nodeID > 0 {
+		iConds = append(iConds, "node_id = ?")
+		iArgs = append(iArgs, nodeID)
+	}
 	if inboundID > 0 {
-		iQuery += ` WHERE id = ?`
+		iConds = append(iConds, "id = ?")
 		iArgs = append(iArgs, inboundID)
+	}
+	if len(iConds) > 0 {
+		iQuery += ` WHERE ` + strings.Join(iConds, " AND ")
 	}
 	iQuery += ` ORDER BY (upload_bytes + download_bytes) DESC, id ASC`
 	iRows, err := s.db.QueryContext(ctx, iQuery, iArgs...)
@@ -1352,7 +1458,7 @@ func (s *Store) GetTrafficStats(ctx context.Context, rangeKey string, memberID, 
 	}
 	for iRows.Next() {
 		var item model.InboundTrafficItem
-		if err := iRows.Scan(&item.ID, &item.Name, &item.Tag, &item.Protocol, &item.UploadBytes, &item.DownloadBytes); err != nil {
+		if err := iRows.Scan(&item.ID, &item.NodeID, &item.Name, &item.Tag, &item.Protocol, &item.UploadBytes, &item.DownloadBytes); err != nil {
 			_ = iRows.Close()
 			return resp, err
 		}
@@ -1360,10 +1466,42 @@ func (s *Store) GetTrafficStats(ctx context.Context, rangeKey string, memberID, 
 	}
 	_ = iRows.Close()
 
+	// By node breakdown (aggregates daily traffic_stats or inbound cumulative totals per node)
+	nQuery := `
+		SELECT
+			n.id,
+			n.name,
+			n.is_local,
+			COALESCE((SELECT SUM(ts.upload_bytes) FROM traffic_stats ts WHERE ts.node_id = n.id AND ts.granularity = 'day'), 0) AS up_bytes,
+			COALESCE((SELECT SUM(ts.download_bytes) FROM traffic_stats ts WHERE ts.node_id = n.id AND ts.granularity = 'day'), 0) AS down_bytes
+		FROM nodes n
+	`
+	var nArgs []any
+	if nodeID > 0 {
+		nQuery += ` WHERE n.id = ?`
+		nArgs = append(nArgs, nodeID)
+	}
+	nQuery += ` ORDER BY (up_bytes + down_bytes) DESC, n.is_local DESC, n.id ASC`
+	nRows, err := s.db.QueryContext(ctx, nQuery, nArgs...)
+	if err != nil {
+		return resp, err
+	}
+	for nRows.Next() {
+		var item model.NodeTrafficItem
+		var isLocal int
+		if err := nRows.Scan(&item.ID, &item.Name, &isLocal, &item.UploadBytes, &item.DownloadBytes); err != nil {
+			_ = nRows.Close()
+			return resp, err
+		}
+		item.IsLocal = isLocal != 0
+		resp.ByNode = append(resp.ByNode, item)
+	}
+	_ = nRows.Close()
+
 	return resp, nil
 }
 
-// ResetTraffic resets cumulative and bucketed traffic counters for all, a member, or an inbound.
+// ResetTraffic resets cumulative and bucketed traffic counters for all, a member, an inbound, or a node.
 func (s *Store) ResetTraffic(ctx context.Context, scope string, id int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1416,13 +1554,26 @@ func (s *Store) ResetTraffic(ctx context.Context, scope string, id int64) error 
 			_ = tx.Rollback()
 			return ErrNotFound
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM traffic_stats WHERE inbound_id = ? OR inbound_tag = (SELECT tag FROM inbounds WHERE id = ?)`, id, id); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM traffic_stats WHERE inbound_id = ?`, id); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	case "node":
+		if id <= 0 {
+			_ = tx.Rollback()
+			return errors.New("node id is required")
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE inbounds SET upload_bytes = 0, download_bytes = 0, updated_at = CURRENT_TIMESTAMP WHERE node_id = ?`, id); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM traffic_stats WHERE node_id = ?`, id); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
 	default:
 		_ = tx.Rollback()
-		return errors.New("scope must be 'all', 'member', or 'inbound'")
+		return errors.New("scope must be 'all', 'member', 'inbound', or 'node'")
 	}
 
 	return tx.Commit()

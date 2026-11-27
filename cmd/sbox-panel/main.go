@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/sbox-panel/sbox-panel/internal/api"
 	"github.com/sbox-panel/sbox-panel/internal/auth"
+	"github.com/sbox-panel/sbox-panel/internal/cluster"
 	"github.com/sbox-panel/sbox-panel/internal/coremgr"
 	"github.com/sbox-panel/sbox-panel/internal/model"
 	"github.com/sbox-panel/sbox-panel/internal/store"
@@ -55,6 +57,8 @@ func main() {
 	switch cmd {
 	case "serve":
 		err = runServe(args)
+	case "agent":
+		err = runAgent(args)
 	case "status":
 		err = runStatus(args)
 	case "show-url":
@@ -84,13 +88,14 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Printf(`sbox-panel %s — Lightweight sing-box management panel
+	fmt.Printf(`sbox-panel %s — Lightweight sing-box management panel & multi-VPS cluster agent
 
 Usage:
   sbox-panel <command> [flags]
 
 Commands:
-  serve          Start the web panel server and sing-box core supervisor
+  serve          Start the Master web panel server, cluster hub, and local sing-box supervisor
+  agent          Start in reverse-connect Agent mode managed by a remote Master panel
   status         Display current panel configuration and sing-box core status
   show-url       Print the panel access URL and secret Web Base Path
   reset-auth     Reset admin password and optionally disable TOTP 2FA
@@ -99,8 +104,11 @@ Commands:
   version        Print version information
 
 Environment Variables:
-  SBOX_DATA_DIR  Default data directory (default: ./data)
-  SBOX_LISTEN    Default listen address (default: 0.0.0.0:18080)
+  SBOX_DATA_DIR  Default data directory (serve: ./data, agent: /var/lib/sbox-agent)
+  SBOX_LISTEN    Default listen address for serve (default: 0.0.0.0:18080)
+  SBOX_MASTER    Master panel base URL for agent mode (e.g. https://master:18080/sbox-xxxx)
+  SBOX_TOKEN     Authentication token for agent mode
+  SBOX_INSECURE  Skip TLS verification for self-signed Master HTTPS (true/1)
 `, Version)
 }
 
@@ -111,8 +119,23 @@ func defaultDataDir() string {
 	return "./data"
 }
 
+func defaultAgentDataDir() string {
+	if v := strings.TrimSpace(os.Getenv("SBOX_DATA_DIR")); v != "" {
+		return v
+	}
+	if runtime.GOOS == "windows" {
+		return "./agent-data"
+	}
+	return "/var/lib/sbox-agent"
+}
+
 func defaultListenEnv() string {
 	return strings.TrimSpace(os.Getenv("SBOX_LISTEN"))
+}
+
+func defaultInsecureEnv() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("SBOX_INSECURE")))
+	return v == "1" || v == "true" || v == "yes"
 }
 
 func openStore(dataDir string) (*store.Store, string, error) {
@@ -140,6 +163,56 @@ func parsePortFromListen(addr string, fallback int) int {
 		return fallback
 	}
 	return p
+}
+
+func runAgent(args []string) error {
+	fsFlags := flag.NewFlagSet("agent", flag.ContinueOnError)
+	masterFlag := fsFlags.String("master", strings.TrimSpace(os.Getenv("SBOX_MASTER")), "Master panel URL including secret base path (env: SBOX_MASTER)")
+	tokenFlag := fsFlags.String("token", strings.TrimSpace(os.Getenv("SBOX_TOKEN")), "Node authentication token from Master (env: SBOX_TOKEN)")
+	dataDirFlag := fsFlags.String("data-dir", defaultAgentDataDir(), "Persistent agent data directory (env: SBOX_DATA_DIR)")
+	insecureFlag := fsFlags.Bool("insecure", defaultInsecureEnv(), "Skip TLS certificate verification for self-signed Master HTTPS (env: SBOX_INSECURE)")
+	if err := fsFlags.Parse(args); err != nil {
+		return err
+	}
+
+	masterURL := strings.TrimSpace(*masterFlag)
+	token := strings.TrimSpace(*tokenFlag)
+	if masterURL == "" {
+		return errors.New("master URL is required (use --master or SBOX_MASTER)")
+	}
+	if token == "" {
+		return errors.New("node token is required (use --token or SBOX_TOKEN)")
+	}
+
+	absDataDir, err := filepath.Abs(*dataDirFlag)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(absDataDir, 0o750); err != nil {
+		return fmt.Errorf("create agent data dir: %w", err)
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	fmt.Printf("============================================================\n")
+	fmt.Printf(" sbox-panel %s starting in AGENT mode\n", Version)
+	fmt.Printf(" Master URL    : %s\n", masterURL)
+	fmt.Printf(" Data Dir      : %s\n", absDataDir)
+	fmt.Printf(" Insecure TLS  : %v\n", *insecureFlag)
+	fmt.Printf("============================================================\n")
+
+	err = cluster.RunAgent(ctx, cluster.AgentConfig{
+		MasterURL:    masterURL,
+		Token:        token,
+		DataDir:      absDataDir,
+		AgentVersion: Version,
+		InsecureTLS:  *insecureFlag,
+	})
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
 }
 
 func runServe(args []string) error {
@@ -189,7 +262,7 @@ func runServe(args []string) error {
 		}
 	}
 
-	hub := telemetry.NewHub(func(deltas []telemetry.TrafficDelta) {
+	persistTraffic := func(nodeID int64, deltas []telemetry.TrafficDelta) {
 		if len(deltas) == 0 {
 			return
 		}
@@ -204,9 +277,13 @@ func runServe(args []string) error {
 		}
 		writeCtx, writeCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer writeCancel()
-		if err := st.RecordTrafficDeltas(writeCtx, time.Now().UTC(), inputs); err != nil {
-			log.Printf("warn: persist traffic deltas: %v", err)
+		if err := st.RecordTrafficDeltas(writeCtx, nodeID, time.Now().UTC(), inputs); err != nil {
+			log.Printf("warn: persist traffic deltas (node=%d): %v", nodeID, err)
 		}
+	}
+
+	hub := telemetry.NewHub(func(deltas []telemetry.TrafficDelta) {
+		persistTraffic(1, deltas)
 	})
 
 	coreMgr := coremgr.NewManager(coremgr.Options{
@@ -217,6 +294,67 @@ func runServe(args []string) error {
 	})
 
 	clashAddr, clashSecret := coreMgr.ClashAPIConfig()
+
+	// Persist local master node runtime metadata
+	localHost, _ := os.Hostname()
+	_ = st.UpdateNodeRuntimeInfo(ctx, 1, store.NodeRuntimeUpdate{
+		OS:           runtime.GOOS,
+		Arch:         runtime.GOARCH,
+		Hostname:     localHost,
+		AgentVersion: Version,
+		CoreVersion:  coreMgr.Status().Version,
+		DataDir:      absDataDir,
+		LastSeenAt:   time.Now().UTC(),
+	})
+
+	localDriver := cluster.NewLocalDriver(1, absDataDir, Version, coreMgr, hub)
+
+	var apiServer *api.Server
+	clusterHub := cluster.NewHub(localDriver, cluster.HubCallbacks{
+		AuthenticateToken: func(token string) (int64, bool) {
+			authCtx, authCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer authCancel()
+			node, err := st.GetNodeByToken(authCtx, token)
+			if err != nil {
+				return 0, false
+			}
+			return node.ID, true
+		},
+		OnAgentConnected: func(nodeID int64, hello cluster.NodeHello) {
+			updCtx, updCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer updCancel()
+			_ = st.UpdateNodeRuntimeInfo(updCtx, nodeID, store.NodeRuntimeUpdate{
+				OS:           hello.OS,
+				Arch:         hello.Arch,
+				Hostname:     hello.Hostname,
+				AgentVersion: hello.AgentVersion,
+				CoreVersion:  hello.CoreStatus.Version,
+				DataDir:      hello.DataDir,
+				PublicIPv4:   hello.PublicIPv4,
+				PublicIPv6:   hello.PublicIPv6,
+				LastSeenAt:   time.Now().UTC(),
+			})
+			hub.PublishLog("info", "cluster", fmt.Sprintf("agent connected: node_id=%d host=%s (%s/%s)", nodeID, hello.Hostname, hello.OS, hello.Arch))
+
+			// Asynchronously push compiled config + managed cert bundles to the newly connected agent
+			if apiServer != nil {
+				go func() {
+					syncCtx, syncCancel := context.WithTimeout(ctx, 30*time.Second)
+					defer syncCancel()
+					if err := apiServer.RecompileAndApplyNode(syncCtx, nodeID); err != nil {
+						log.Printf("warn: initial config sync to agent node=%d failed: %v", nodeID, err)
+					}
+				}()
+			}
+		},
+		OnAgentDisconnected: func(nodeID int64) {
+			hub.PublishLog("warn", "cluster", fmt.Sprintf("agent disconnected: node_id=%d", nodeID))
+		},
+		OnTrafficDeltas: func(nodeID int64, deltas []telemetry.TrafficDelta) {
+			persistTraffic(nodeID, deltas)
+		},
+	})
+	defer clusterHub.Close()
 
 	var staticFS fs.FS
 	if embeddedFS, err := web.DistFS(); err == nil {
@@ -236,10 +374,11 @@ func runServe(args []string) error {
 		}
 	}
 
-	apiServer, err := api.NewServer(api.ServerConfig{
+	apiServer, err = api.NewServer(api.ServerConfig{
 		Store:        st,
 		Tokens:       auth.NewTokenManager(jwtSecret, auth.DefaultTokenTTL),
 		RateLimiter:  auth.NewLoginRateLimiter(5, 5*time.Minute, 15*time.Minute),
+		Hub:          clusterHub,
 		Core:         coreMgr,
 		Telemetry:    hub,
 		StaticFS:     staticFS,
@@ -254,7 +393,7 @@ func runServe(args []string) error {
 		return fmt.Errorf("init api server: %w", err)
 	}
 
-	if err := apiServer.RecompileAndApply(ctx); err != nil {
+	if err := apiServer.RecompileAndApplyNode(ctx, 1); err != nil {
 		log.Printf("warn: build initial sing-box config: %v", err)
 	}
 
@@ -314,7 +453,7 @@ func runServe(args []string) error {
 	actualPort := parsePortFromListen(rawLn.Addr().String(), panelSettings.ListenPort)
 
 	fmt.Printf("============================================================\n")
-	fmt.Printf(" sbox-panel %s started (%s)\n", Version, strings.ToUpper(scheme))
+	fmt.Printf(" sbox-panel %s started (%s Master)\n", Version, strings.ToUpper(scheme))
 	fmt.Printf(" Instance ID   : %s\n", instanceID)
 	fmt.Printf(" Data Dir      : %s\n", absDataDir)
 	fmt.Printf(" Listen Addr   : %s\n", rawLn.Addr().String())
@@ -337,9 +476,11 @@ func runServe(args []string) error {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutCancel()
 		_ = httpServer.Shutdown(shutCtx)
+		clusterHub.Close()
 		_ = coreMgr.Stop()
 		return nil
 	case err := <-errCh:
+		clusterHub.Close()
 		_ = coreMgr.Stop()
 		return err
 	}
@@ -368,6 +509,7 @@ func runStatus(args []string) error {
 	}
 	initVal, _ := st.GetSettingDefault(ctx, model.SettingInitialized, "false")
 	adminUser, _ := st.GetSettingDefault(ctx, model.SettingAdminUsername, "")
+	nodes, _ := st.ListNodes(ctx)
 
 	coreMgr := coremgr.NewManager(coremgr.Options{DataDir: absDataDir})
 	cs := coreMgr.Status()
@@ -383,6 +525,7 @@ func runStatus(args []string) error {
 	fmt.Printf("Listen Port   : %d\n", ps.ListenPort)
 	fmt.Printf("Web Base Path : %s\n", ps.WebBasePath)
 	fmt.Printf("Panel Cert ID : %d\n", ps.PanelCertID)
+	fmt.Printf("Cluster Nodes : %d\n", len(nodes))
 	fmt.Printf("TOTP 2FA      : %v\n", ps.TOTPEnabled)
 	fmt.Printf("Core Binary   : %s (exists=%v, version=%s, has_backup=%v)\n", cs.BinaryPath, cs.BinaryExists, cs.Version, cs.HasBackup)
 	return nil

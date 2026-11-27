@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/sbox-panel/sbox-panel/internal/cert"
+	"github.com/sbox-panel/sbox-panel/internal/cluster"
 	"github.com/sbox-panel/sbox-panel/internal/model"
 	"github.com/sbox-panel/sbox-panel/internal/store"
 )
@@ -28,7 +29,8 @@ func (s *Server) certsRootDir() string {
 }
 
 func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) {
-	certs, err := s.store.ListCertificates(r.Context())
+	nodeID := parseNodeIDQuery(r, 1, true)
+	certs, err := s.store.ListCertificates(r.Context(), nodeID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list certificates")
 		return
@@ -41,9 +43,36 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func applyCertBundleToRecord(rec *model.Certificate, bundle *cluster.CertFileBundle) {
+	if bundle == nil {
+		return
+	}
+	if len(bundle.CertPEM) > 0 {
+		rec.CertPEM = string(bundle.CertPEM)
+	}
+	if len(bundle.KeyPEM) > 0 {
+		rec.KeyPEM = string(bundle.KeyPEM)
+	}
+	if bundle.Info != nil {
+		info := bundle.Info
+		if len(info.Domains) > 0 {
+			rec.Domains = info.Domains
+		}
+		rec.CertPath = info.CertPath
+		rec.KeyPath = info.KeyPath
+		rec.Issuer = info.Issuer
+		rec.Fingerprint = info.Fingerprint
+		nb := info.NotBefore.UTC()
+		na := info.NotAfter.UTC()
+		rec.NotBefore = &nb
+		rec.NotAfter = &na
+	}
+}
+
 func (s *Server) handleCreateSelfSignedCert(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req struct {
+		NodeID    int64    `json:"node_id"`
 		Name      string   `json:"name"`
 		Domains   []string `json:"domains"`
 		ValidDays int      `json:"valid_days"`
@@ -60,46 +89,43 @@ func (s *Server) handleCreateSelfSignedCert(w http.ResponseWriter, r *http.Reque
 	if req.ValidDays <= 0 {
 		req.ValidDays = 3650
 	}
+	nodeID := req.NodeID
+	if nodeID <= 0 {
+		nodeID = parseNodeIDQuery(r, 1, false)
+	}
 
-	suffix, err := store.RandomHex(4)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to generate directory suffix")
+	ctrl, _, ok := s.resolveOnlineController(w, ctx, nodeID)
+	if !ok {
 		return
 	}
-	certDir := filepath.Join(s.certsRootDir(), "self-"+suffix)
 
-	info, err := cert.GenerateSelfSigned(cert.SelfSignedOptions{
-		CertDir:   certDir,
+	rec := &model.Certificate{
+		NodeID:    nodeID,
+		Name:      req.Name,
+		Type:      "self_signed",
 		Domains:   req.Domains,
-		ValidDays: req.ValidDays,
-	})
+		AutoRenew: false,
+	}
+	if err := s.store.CreateCertificate(ctx, rec); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to allocate certificate record: "+err.Error())
+		return
+	}
+
+	bundle, err := ctrl.GenerateSelfSigned(ctx, rec.ID, req.Domains, req.ValidDays)
 	if err != nil {
+		_ = s.store.DeleteCertificate(ctx, rec.ID)
 		writeError(w, http.StatusBadRequest, "generate self-signed certificate failed: "+err.Error())
 		return
 	}
 
-	nb := info.NotBefore.UTC()
-	na := info.NotAfter.UTC()
-	rec := &model.Certificate{
-		Name:        req.Name,
-		Type:        "self_signed",
-		Domains:     info.Domains,
-		CertPath:    info.CertPath,
-		KeyPath:     info.KeyPath,
-		Issuer:      info.Issuer,
-		Fingerprint: info.Fingerprint,
-		NotBefore:   &nb,
-		NotAfter:    &na,
-		AutoRenew:   false,
-	}
-	if err := s.store.CreateCertificate(ctx, rec); err != nil {
-		_ = os.RemoveAll(certDir)
-		writeError(w, http.StatusInternalServerError, "failed to save certificate: "+err.Error())
+	applyCertBundleToRecord(rec, bundle)
+	if err := s.store.UpdateCertificate(ctx, rec); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save certificate metadata: "+err.Error())
 		return
 	}
 
 	if s.telemetry != nil {
-		s.telemetry.PublishLog("info", "panel", fmt.Sprintf("generated self-signed certificate %q (%s)", rec.Name, strings.Join(rec.Domains, ",")))
+		s.telemetry.PublishLog("info", "panel", fmt.Sprintf("generated self-signed certificate %q on node %d (%s)", rec.Name, nodeID, strings.Join(rec.Domains, ",")))
 	}
 	writeJSON(w, http.StatusCreated, rec)
 }
@@ -107,6 +133,7 @@ func (s *Server) handleCreateSelfSignedCert(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleCreateExternalCert(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req struct {
+		NodeID   int64  `json:"node_id"`
 		Name     string `json:"name"`
 		CertPath string `json:"cert_path"`
 		KeyPath  string `json:"key_path"`
@@ -122,8 +149,17 @@ func (s *Server) handleCreateExternalCert(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "name, cert_path, and key_path are required")
 		return
 	}
+	nodeID := req.NodeID
+	if nodeID <= 0 {
+		nodeID = parseNodeIDQuery(r, 1, false)
+	}
 
-	info, err := cert.InspectCertFiles(req.CertPath, req.KeyPath)
+	ctrl, _, ok := s.resolveOnlineController(w, ctx, nodeID)
+	if !ok {
+		return
+	}
+
+	info, err := ctrl.InspectCertFiles(ctx, req.CertPath, req.KeyPath)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid external certificate files: "+err.Error())
 		return
@@ -132,6 +168,7 @@ func (s *Server) handleCreateExternalCert(w http.ResponseWriter, r *http.Request
 	nb := info.NotBefore.UTC()
 	na := info.NotAfter.UTC()
 	rec := &model.Certificate{
+		NodeID:      nodeID,
 		Name:        req.Name,
 		Type:        "external",
 		Domains:     info.Domains,
@@ -149,7 +186,7 @@ func (s *Server) handleCreateExternalCert(w http.ResponseWriter, r *http.Request
 	}
 
 	if s.telemetry != nil {
-		s.telemetry.PublishLog("info", "panel", fmt.Sprintf("imported external certificate %q from %s", rec.Name, rec.CertPath))
+		s.telemetry.PublishLog("info", "panel", fmt.Sprintf("imported external certificate %q on node %d from %s", rec.Name, nodeID, rec.CertPath))
 	}
 	writeJSON(w, http.StatusCreated, rec)
 }
@@ -157,6 +194,7 @@ func (s *Server) handleCreateExternalCert(w http.ResponseWriter, r *http.Request
 func (s *Server) handleCreateACMECert(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req struct {
+		NodeID      int64             `json:"node_id"`
 		Name        string            `json:"name"`
 		Email       string            `json:"email"`
 		Domains     []string          `json:"domains"`
@@ -196,28 +234,12 @@ func (s *Server) handleCreateACMECert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	suffix, err := store.RandomHex(4)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to generate directory suffix")
-		return
+	nodeID := req.NodeID
+	if nodeID <= 0 {
+		nodeID = parseNodeIDQuery(r, 1, false)
 	}
-	certDir := filepath.Join(s.certsRootDir(), "acme-"+suffix)
-	accountDir := filepath.Join(s.certsRootDir(), "acme-accounts")
-
-	info, err := cert.IssueACME(ctx, cert.ACMEOptions{
-		CertDir:     certDir,
-		AccountDir:  accountDir,
-		Email:       req.Email,
-		Domains:     req.Domains,
-		Challenge:   req.Challenge,
-		HTTPPort:    req.HTTPPort,
-		DNSProvider: req.DNSProvider,
-		DNSCreds:    req.DNSCreds,
-		Staging:     req.Staging,
-	})
-	if err != nil {
-		_ = os.RemoveAll(certDir)
-		writeError(w, http.StatusBadGateway, "ACME certificate issuance failed: "+err.Error())
+	ctrl, _, ok := s.resolveOnlineController(w, ctx, nodeID)
+	if !ok {
 		return
 	}
 
@@ -231,57 +253,81 @@ func (s *Server) handleCreateACMECert(w http.ResponseWriter, r *http.Request) {
 		credsJSON = string(b)
 	}
 
-	nb := info.NotBefore.UTC()
-	na := info.NotAfter.UTC()
 	rec := &model.Certificate{
+		NodeID:       nodeID,
 		Name:         req.Name,
 		Type:         certType,
-		Domains:      info.Domains,
+		Domains:      req.Domains,
 		ACMEEmail:    req.Email,
 		ACMEHTTPPort: req.HTTPPort,
 		ACMEStaging:  req.Staging,
 		DNSProvider:  req.DNSProvider,
 		DNSCredsJSON: credsJSON,
-		CertPath:     info.CertPath,
-		KeyPath:      info.KeyPath,
-		Issuer:       info.Issuer,
-		Fingerprint:  info.Fingerprint,
-		NotBefore:    &nb,
-		NotAfter:     &na,
 		AutoRenew:    autoRenew,
 	}
 	if err := s.store.CreateCertificate(ctx, rec); err != nil {
-		_ = os.RemoveAll(certDir)
-		writeError(w, http.StatusInternalServerError, "failed to save ACME certificate: "+err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to allocate ACME certificate record: "+err.Error())
+		return
+	}
+
+	bundle, err := ctrl.IssueACME(ctx, rec.ID, cert.ACMEOptions{
+		Email:       req.Email,
+		Domains:     req.Domains,
+		Challenge:   req.Challenge,
+		HTTPPort:    req.HTTPPort,
+		DNSProvider: req.DNSProvider,
+		DNSCreds:    req.DNSCreds,
+		Staging:     req.Staging,
+	})
+	if err != nil {
+		_ = s.store.DeleteCertificate(ctx, rec.ID)
+		writeError(w, http.StatusBadGateway, "ACME certificate issuance failed: "+err.Error())
+		return
+	}
+
+	applyCertBundleToRecord(rec, bundle)
+	if err := s.store.UpdateCertificate(ctx, rec); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save ACME certificate metadata: "+err.Error())
 		return
 	}
 
 	if s.telemetry != nil {
-		s.telemetry.PublishLog("info", "panel", fmt.Sprintf("issued ACME (%s) certificate %q for %s", req.Challenge, rec.Name, strings.Join(rec.Domains, ",")))
+		s.telemetry.PublishLog("info", "panel", fmt.Sprintf("issued ACME (%s) certificate %q on node %d for %s", req.Challenge, rec.Name, nodeID, strings.Join(rec.Domains, ",")))
 	}
 	writeJSON(w, http.StatusCreated, rec)
 }
 
 func (s *Server) renewCertificateRecord(ctx context.Context, c *model.Certificate) error {
-	var (
-		info *cert.CertInfo
-		err  error
-	)
+	if s.hub == nil {
+		return errors.New("节点当前离线")
+	}
+	ctrl, ok := s.hub.Get(c.NodeID)
+	if !ok || !ctrl.IsOnline() {
+		return errors.New("节点当前离线")
+	}
 
+	var err error
 	switch c.Type {
 	case "self_signed":
-		certDir := filepath.Dir(c.CertPath)
-		if certDir == "" || certDir == "." {
-			suffix, _ := store.RandomHex(4)
-			certDir = filepath.Join(s.certsRootDir(), "self-"+suffix)
+		var bundle *cluster.CertFileBundle
+		bundle, err = ctrl.GenerateSelfSigned(ctx, c.ID, c.Domains, 3650)
+		if err == nil {
+			applyCertBundleToRecord(c, bundle)
 		}
-		info, err = cert.GenerateSelfSigned(cert.SelfSignedOptions{
-			CertDir:   certDir,
-			Domains:   c.Domains,
-			ValidDays: 3650,
-		})
 	case "external":
-		info, err = cert.InspectCertFiles(c.CertPath, c.KeyPath)
+		var info *cert.CertInfo
+		info, err = ctrl.InspectCertFiles(ctx, c.CertPath, c.KeyPath)
+		if err == nil && info != nil {
+			nb := info.NotBefore.UTC()
+			na := info.NotAfter.UTC()
+			c.Domains = info.Domains
+			c.CertPath = info.CertPath
+			c.KeyPath = info.KeyPath
+			c.Issuer = info.Issuer
+			c.Fingerprint = info.Fingerprint
+			c.NotBefore = &nb
+			c.NotAfter = &na
+		}
 	case "acme_http", "acme_dns":
 		challenge := "http01"
 		if c.Type == "acme_dns" {
@@ -291,14 +337,8 @@ func (s *Server) renewCertificateRecord(ctx context.Context, c *model.Certificat
 		if strings.TrimSpace(c.DNSCredsJSON) != "" {
 			_ = json.Unmarshal([]byte(c.DNSCredsJSON), &creds)
 		}
-		certDir := filepath.Dir(c.CertPath)
-		if certDir == "" || certDir == "." {
-			suffix, _ := store.RandomHex(4)
-			certDir = filepath.Join(s.certsRootDir(), "acme-"+suffix)
-		}
-		info, err = cert.IssueACME(ctx, cert.ACMEOptions{
-			CertDir:     certDir,
-			AccountDir:  filepath.Join(s.certsRootDir(), "acme-accounts"),
+		var bundle *cluster.CertFileBundle
+		bundle, err = ctrl.IssueACME(ctx, c.ID, cert.ACMEOptions{
 			Email:       c.ACMEEmail,
 			Domains:     c.Domains,
 			Challenge:   challenge,
@@ -307,6 +347,9 @@ func (s *Server) renewCertificateRecord(ctx context.Context, c *model.Certificat
 			DNSCreds:    creds,
 			Staging:     c.ACMEStaging,
 		})
+		if err == nil {
+			applyCertBundleToRecord(c, bundle)
+		}
 	default:
 		return fmt.Errorf("unsupported certificate type %q", c.Type)
 	}
@@ -317,31 +360,23 @@ func (s *Server) renewCertificateRecord(ctx context.Context, c *model.Certificat
 		return err
 	}
 
-	nb := info.NotBefore.UTC()
-	na := info.NotAfter.UTC()
-	c.Domains = info.Domains
-	c.CertPath = info.CertPath
-	c.KeyPath = info.KeyPath
-	c.Issuer = info.Issuer
-	c.Fingerprint = info.Fingerprint
-	c.NotBefore = &nb
-	c.NotAfter = &na
 	c.LastError = ""
-
 	if err := s.store.UpdateCertificate(ctx, c); err != nil {
 		return err
 	}
 
-	_ = s.RecompileAndApply(ctx)
-	if ps, err := s.store.GetPanelSettings(ctx); err == nil && ps.PanelCertID == c.ID && s.onPanelCertChange != nil {
-		s.onPanelCertChange()
+	_ = s.RecompileAndApplyNode(ctx, c.NodeID)
+	if c.NodeID == 1 {
+		if ps, err := s.store.GetPanelSettings(ctx); err == nil && ps.PanelCertID == c.ID && s.onPanelCertChange != nil {
+			s.onPanelCertChange()
+		}
 	}
 	return nil
 }
 
-// RenewDueCertificates checks all auto-renewing ACME certificates expiring within 30 days and renews them.
+// RenewDueCertificates checks all auto-renewing ACME certificates across online nodes expiring within 30 days.
 func (s *Server) RenewDueCertificates(ctx context.Context) {
-	certs, err := s.store.ListCertificates(ctx)
+	certs, err := s.store.ListCertificates(ctx, 0)
 	if err != nil {
 		return
 	}
@@ -354,8 +389,11 @@ func (s *Server) RenewDueCertificates(ctx context.Context) {
 		if c.NotAfter != nil && c.NotAfter.After(threshold) {
 			continue
 		}
+		if s.hub != nil && !s.hub.IsOnline(c.NodeID) {
+			continue
+		}
 		if s.telemetry != nil {
-			s.telemetry.PublishLog("info", "panel", fmt.Sprintf("auto-renewing expiring certificate %q (id=%d)", c.Name, c.ID))
+			s.telemetry.PublishLog("info", "panel", fmt.Sprintf("auto-renewing expiring certificate %q (id=%d, node=%d)", c.Name, c.ID, c.NodeID))
 		}
 		if err := s.renewCertificateRecord(ctx, c); err != nil {
 			if s.telemetry != nil {
@@ -381,6 +419,10 @@ func (s *Server) handleRenewCertificate(w http.ResponseWriter, r *http.Request) 
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load certificate")
+		return
+	}
+
+	if _, _, ok := s.resolveOnlineController(w, ctx, c.NodeID); !ok {
 		return
 	}
 
@@ -416,7 +458,7 @@ func (s *Server) handleDeleteCertificate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	ps, _ := s.store.GetPanelSettings(ctx)
-	usedByPanel := ps.PanelCertID == id
+	usedByPanel := c.NodeID == 1 && ps.PanelCertID == id
 
 	if (inRefCount > 0 || usedByPanel) && !force {
 		writeError(w, http.StatusConflict, "certificate is currently referenced by inbound(s) or panel HTTPS; pass ?force=true to delete")
@@ -438,8 +480,8 @@ func (s *Server) handleDeleteCertificate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Only clean up managed certificate directories inside <dataDir>/certs/
-	if c.Type != "external" && c.CertPath != "" {
+	// Only clean up local managed certificate directories inside <dataDir>/certs/
+	if c.NodeID == 1 && c.Type != "external" && c.CertPath != "" {
 		absRoot, err1 := filepath.Abs(s.certsRootDir())
 		absCertDir, err2 := filepath.Abs(filepath.Dir(c.CertPath))
 		if err1 == nil && err2 == nil && strings.HasPrefix(absCertDir, absRoot+string(filepath.Separator)) {
@@ -448,7 +490,7 @@ func (s *Server) handleDeleteCertificate(w http.ResponseWriter, r *http.Request)
 	}
 
 	if inRefCount > 0 {
-		_ = s.RecompileAndApply(ctx)
+		_ = s.RecompileAndApplyNode(ctx, c.NodeID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -465,8 +507,10 @@ func (s *Server) handleToolRealityKeypair(w http.ResponseWriter, _ *http.Request
 }
 
 func (s *Server) handleToolRealityProbe(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	var req struct {
 		Target string `json:"target"`
+		NodeID int64  `json:"node_id"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -477,7 +521,21 @@ func (s *Server) handleToolRealityProbe(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "target domain or host:port is required")
 		return
 	}
-	res := cert.ProbeRealityTarget(r.Context(), req.Target)
+
+	nodeID := req.NodeID
+	if nodeID <= 0 {
+		nodeID = parseNodeIDQuery(r, 1, false)
+	}
+	ctrl, _, ok := s.resolveOnlineController(w, ctx, nodeID)
+	if !ok {
+		return
+	}
+
+	res, err := ctrl.ProbeRealityTarget(ctx, req.Target)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "reality probe failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, res)
 }
 

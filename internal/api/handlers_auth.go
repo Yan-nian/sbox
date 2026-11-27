@@ -98,6 +98,13 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if id := strings.TrimSpace(req.InstanceID); id != "" {
+		if local, err := s.store.GetNode(ctx, 1); err == nil {
+			local.Name = id
+			_ = s.store.UpdateNode(ctx, local)
+		}
+	}
+
 	if activeBasePath != s.BasePath() {
 		s.SetBasePath(activeBasePath)
 	}

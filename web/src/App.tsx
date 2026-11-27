@@ -3,6 +3,7 @@ import { AlertCircle, Loader2, RefreshCw } from "lucide-react";
 import { buildAppUrl, getRelativeRoute } from "@/lib/basePath";
 import { ThemeProvider } from "@/contexts/ThemeContext";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
+import { NodeProvider, useNode } from "@/contexts/NodeContext";
 import { ToastProvider } from "@/components/ui/Toast";
 import { Button } from "@/components/ui/primitives";
 import { AppShell, type AppRoute } from "@/components/AppShell";
@@ -10,6 +11,7 @@ import { useDashboardStream } from "@/hooks/useDashboardStream";
 import { SetupPage } from "@/pages/SetupPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { DashboardPage } from "@/pages/DashboardPage";
+import { NodesPage } from "@/pages/NodesPage";
 import { InboundsPage } from "@/pages/InboundsPage";
 import { MembersPage } from "@/pages/MembersPage";
 import { CertificatesPage } from "@/pages/CertificatesPage";
@@ -20,6 +22,7 @@ import { RoadmapPage } from "@/pages/RoadmapPage";
 
 const VALID_ROUTES: ReadonlySet<AppRoute> = new Set([
   "/",
+  "/nodes",
   "/inbounds",
   "/members",
   "/certs",
@@ -35,9 +38,10 @@ function parseRoute(): AppRoute {
   return VALID_ROUTES.has(rel) ? rel : "/";
 }
 
-function AuthenticatedWorkspace() {
+function WorkspaceShell() {
   const [route, setRoute] = useState<AppRoute>(() => parseRoute());
-  const live = useDashboardStream(true);
+  const { activeNodeId } = useNode();
+  const live = useDashboardStream(true, activeNodeId);
 
   useEffect(() => {
     const onPopState = () => setRoute(parseRoute());
@@ -62,16 +66,25 @@ function AuthenticatedWorkspace() {
       sseConnected={live.connected}
     >
       {route === "/" && <DashboardPage live={live} onNavigate={navigate} />}
-      {route === "/inbounds" && <InboundsPage />}
+      {route === "/nodes" && <NodesPage onNavigate={navigate} />}
+      {route === "/inbounds" && <InboundsPage onNavigate={navigate} />}
       {route === "/members" && <MembersPage />}
-      {route === "/certs" && <CertificatesPage />}
-      {route === "/core" && <CoreLogsPage live={live} />}
-      {route === "/connections" && <ConnectionsPage />}
+      {route === "/certs" && <CertificatesPage onNavigate={navigate} />}
+      {route === "/core" && <CoreLogsPage live={live} onNavigate={navigate} />}
+      {route === "/connections" && <ConnectionsPage onNavigate={navigate} />}
       {route === "/settings" && <SettingsPage />}
       {(route === "/routing" || route === "/sync") && (
         <RoadmapPage route={route} onNavigate={navigate} />
       )}
     </AppShell>
+  );
+}
+
+function AuthenticatedWorkspace() {
+  return (
+    <NodeProvider>
+      <WorkspaceShell />
+    </NodeProvider>
   );
 }
 

@@ -85,15 +85,104 @@ export interface SystemInfo {
   public_ipv6: string;
 }
 
+// --- Milestone 3: Multi-Node Cluster Types ---
+
+export interface NodeView {
+  id: number;
+  name: string;
+  is_local: boolean;
+  online: boolean;
+  core_running: boolean;
+  core_version: string;
+  up_speed: number;
+  down_speed: number;
+  active_connections: number;
+  mem_bytes: number;
+  inbound_count: number;
+  os: string;
+  arch: string;
+  hostname: string;
+  agent_version: string;
+  data_dir?: string;
+  public_ipv4: string;
+  public_ipv6: string;
+  override_patch: string;
+  log_level: string;
+  github_proxy: string;
+  last_seen_at?: string;
+  note: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface NodesResponse {
+  nodes: NodeView[];
+}
+
+export interface CreateNodeRequest {
+  name: string;
+  note?: string;
+  public_ipv4?: string;
+  public_ipv6?: string;
+}
+
+export interface CreateNodeResponse {
+  node: NodeView;
+  token: string;
+  install_command: string;
+}
+
+export interface UpdateNodeRequest {
+  name?: string;
+  note?: string;
+  public_ipv4?: string;
+  public_ipv6?: string;
+  github_proxy?: string;
+  log_level?: string;
+}
+
+export interface ResetNodeTokenResponse {
+  token: string;
+  install_command: string;
+}
+
+export interface ClusterSummary {
+  total_nodes: number;
+  online_nodes: number;
+  total_up_speed: number;
+  total_down_speed: number;
+  total_connections: number;
+}
+
+export interface NodeUpgradeBatchRequest {
+  tag_name: string;
+  proxy_url?: string;
+}
+
+export interface NodeUpgradeBatchItem {
+  node_id: number;
+  node_name: string;
+  result: UpgradeResult;
+}
+
+export interface NodeUpgradeBatchResponse {
+  results: NodeUpgradeBatchItem[];
+}
+
 export interface DashboardSummary {
+  node?: NodeView;
   core: CoreStatus;
   metrics: MetricsSnapshot;
   system: SystemInfo;
+  cluster?: ClusterSummary;
 }
 
 export interface DashboardStreamPayload {
+  node_id?: number;
+  online?: boolean;
   core: CoreStatus;
   metrics: MetricsSnapshot;
+  cluster?: ClusterSummary;
 }
 
 export interface ReleaseInfo {
@@ -182,7 +271,7 @@ export interface SettingsUpdateRequest {
   panel_cert_id?: number;
 }
 
-// --- Milestone 2: Certificates & Reality Tools ---
+// --- Milestone 2/3: Certificates & Reality Tools ---
 
 export type CertificateType = "acme_http" | "acme_dns" | "self_signed" | "external";
 export type ACMEChallenge = "http01" | "dns01";
@@ -190,6 +279,7 @@ export type DNSProvider = "cloudflare" | "alidns" | "dnspod";
 
 export interface CertificateItem {
   id: number;
+  node_id?: number;
   name: string;
   type: CertificateType;
   domains: string[];
@@ -213,18 +303,21 @@ export interface CertificatesResponse {
 }
 
 export interface CreateSelfSignedCertRequest {
+  node_id?: number;
   name: string;
   domains: string[];
   valid_days?: number;
 }
 
 export interface CreateExternalCertRequest {
+  node_id?: number;
   name: string;
   cert_path: string;
   key_path: string;
 }
 
 export interface CreateACMECertRequest {
+  node_id?: number;
   name: string;
   email: string;
   domains: string[];
@@ -254,7 +347,7 @@ export interface RealityProbeResult {
   error?: string;
 }
 
-// --- Milestone 2: Members ---
+// --- Milestone 2: Members (Global) ---
 
 export interface MemberItem {
   id: number;
@@ -288,7 +381,7 @@ export interface UpdateMemberRequest {
   enabled?: boolean;
 }
 
-// --- Milestone 2: Multi-Protocol Inbounds ---
+// --- Milestone 2/3: Multi-Protocol Inbounds ---
 
 export type InboundProtocol =
   | "vless"
@@ -369,6 +462,7 @@ export interface InboundSettings {
 
 export interface InboundItem {
   id: number;
+  node_id?: number;
   name: string;
   tag: string;
   protocol: InboundProtocol;
@@ -400,6 +494,7 @@ export interface InboundDefaultsResponse {
 }
 
 export interface SaveInboundRequest {
+  node_id?: number;
   name: string;
   tag?: string;
   protocol: InboundProtocol;
@@ -415,7 +510,7 @@ export interface SaveInboundRequest {
   extra_entries?: ExtraEntry[];
 }
 
-// --- Milestone 2: Traffic Stats ---
+// --- Milestone 2/3: Traffic Stats ---
 
 export type TrafficRange = "24h" | "7d" | "30d";
 
@@ -441,11 +536,20 @@ export interface TrafficInboundRow {
   download_bytes: number;
 }
 
+export interface TrafficNodeRow {
+  id: number;
+  name: string;
+  is_local: boolean;
+  upload_bytes: number;
+  download_bytes: number;
+}
+
 export interface TrafficStatsResponse {
   range: TrafficRange;
   series: TrafficBucket[];
   by_member: TrafficMemberRow[];
   by_inbound: TrafficInboundRow[];
+  by_node?: TrafficNodeRow[];
 }
 
 export interface ResetTrafficRequest {

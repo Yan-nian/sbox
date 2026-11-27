@@ -53,7 +53,7 @@ export function SettingsPage() {
     try {
       const [data, certRes] = await Promise.all([
         api.getSettings(),
-        api.listCertificates().catch(() => ({ certificates: [] })),
+        api.listCertificates(1).catch(() => ({ certificates: [] })),
       ]);
       setSettings(data);
       setCertificates(Array.isArray(certRes.certificates) ? certRes.certificates : []);

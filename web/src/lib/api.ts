@@ -10,6 +10,8 @@ import type {
   CreateACMECertRequest,
   CreateExternalCertRequest,
   CreateMemberRequest,
+  CreateNodeRequest,
+  CreateNodeResponse,
   CreateSelfSignedCertRequest,
   DashboardSummary,
   InboundDefaultsResponse,
@@ -21,9 +23,14 @@ import type {
   LogsRecentResponse,
   MemberItem,
   MembersResponse,
+  NodesResponse,
+  NodeUpgradeBatchRequest,
+  NodeUpgradeBatchResponse,
+  NodeView,
   RealityKeypair,
   RealityProbeResult,
   ReleasesResponse,
+  ResetNodeTokenResponse,
   ResetTrafficRequest,
   SaveInboundRequest,
   SettingsData,
@@ -36,6 +43,7 @@ import type {
   TrafficRange,
   TrafficStatsResponse,
   UpdateMemberRequest,
+  UpdateNodeRequest,
   UpgradeRequest,
   UpgradeResult,
 } from "@/types/api";
@@ -78,6 +86,12 @@ export function setAuthToken(token: string | null): void {
   } catch {
     // Ignore storage errors in restricted contexts
   }
+}
+
+function withNodeId(path: string, nodeId?: number): string {
+  if (nodeId === undefined || nodeId === null) return path;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}node_id=${encodeURIComponent(String(nodeId))}`;
 }
 
 interface RequestOptions extends Omit<RequestInit, "body"> {
@@ -140,12 +154,13 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return (parsed ?? {}) as T;
 }
 
-export function buildSSEUrl(path: string): string {
-  const url = apiUrl(path);
+export function buildSSEUrl(path: string, nodeId?: number): string {
+  let url = apiUrl(withNodeId(path, nodeId));
   const token = getAuthToken();
   if (!token) return url;
   const sep = url.includes("?") ? "&" : "?";
-  return `${url}${sep}token=${encodeURIComponent(token)}`;
+  url = `${url}${sep}token=${encodeURIComponent(token)}`;
+  return url;
 }
 
 export const api = {
@@ -198,54 +213,97 @@ export const api = {
       skipAuthRedirect: true,
     }),
 
-  // Dashboard
-  getDashboardSummary: () => request<DashboardSummary>("/dashboard/summary"),
+  // Milestone 3: Cluster Nodes
+  listNodes: () => request<NodesResponse>("/nodes"),
 
-  // Core lifecycle & upgrades
-  getCoreStatus: () => request<CoreStatus>("/core/status"),
-  startCore: () => request<CoreStatus>("/core/start", { method: "POST" }),
-  stopCore: () => request<CoreStatus>("/core/stop", { method: "POST" }),
-  restartCore: () => request<CoreStatus>("/core/restart", { method: "POST" }),
-  reloadCore: () => request<CoreStatus>("/core/reload", { method: "POST" }),
-  rollbackCore: () => request<CoreStatus>("/core/rollback", { method: "POST" }),
-
-  listReleases: (prerelease: boolean) =>
-    request<ReleasesResponse>(`/core/releases?prerelease=${prerelease ? "true" : "false"}`),
-
-  upgradeCore: (payload: UpgradeRequest) =>
-    request<UpgradeResult>("/core/upgrade", {
+  createNode: (payload: CreateNodeRequest) =>
+    request<CreateNodeResponse>("/nodes", {
       method: "POST",
       body: payload,
     }),
 
-  uploadCoreBinary: (file: File) => {
+  updateNode: (id: number, payload: UpdateNodeRequest) =>
+    request<NodeView>(`/nodes/${id}`, {
+      method: "PUT",
+      body: payload,
+    }),
+
+  resetNodeToken: (id: number) =>
+    request<ResetNodeTokenResponse>(`/nodes/${id}/reset-token`, {
+      method: "POST",
+    }),
+
+  deleteNode: (id: number, force = false) =>
+    request<{ ok?: boolean }>(`/nodes/${id}${force ? "?force=true" : ""}`, {
+      method: "DELETE",
+    }),
+
+  upgradeAllNodes: (payload: NodeUpgradeBatchRequest) =>
+    request<NodeUpgradeBatchResponse>("/nodes/upgrade-all", {
+      method: "POST",
+      body: payload,
+    }),
+
+  // Dashboard (node-scoped)
+  getDashboardSummary: (nodeId?: number) =>
+    request<DashboardSummary>(withNodeId("/dashboard/summary", nodeId)),
+
+  // Core lifecycle & upgrades (node-scoped)
+  getCoreStatus: (nodeId?: number) =>
+    request<CoreStatus>(withNodeId("/core/status", nodeId)),
+  startCore: (nodeId?: number) =>
+    request<CoreStatus>(withNodeId("/core/start", nodeId), { method: "POST" }),
+  stopCore: (nodeId?: number) =>
+    request<CoreStatus>(withNodeId("/core/stop", nodeId), { method: "POST" }),
+  restartCore: (nodeId?: number) =>
+    request<CoreStatus>(withNodeId("/core/restart", nodeId), { method: "POST" }),
+  reloadCore: (nodeId?: number) =>
+    request<CoreStatus>(withNodeId("/core/reload", nodeId), { method: "POST" }),
+  rollbackCore: (nodeId?: number) =>
+    request<CoreStatus>(withNodeId("/core/rollback", nodeId), { method: "POST" }),
+
+  listReleases: (prerelease: boolean, nodeId?: number) =>
+    request<ReleasesResponse>(
+      withNodeId(`/core/releases?prerelease=${prerelease ? "true" : "false"}`, nodeId),
+    ),
+
+  upgradeCore: (payload: UpgradeRequest, nodeId?: number) =>
+    request<UpgradeResult>(withNodeId("/core/upgrade", nodeId), {
+      method: "POST",
+      body: payload,
+    }),
+
+  uploadCoreBinary: (file: File, nodeId?: number) => {
     const form = new FormData();
     form.append("binary", file);
-    return request<UpgradeResult>("/core/upload", {
+    return request<UpgradeResult>(withNodeId("/core/upload", nodeId), {
       method: "POST",
       body: form,
     });
   },
 
-  getCoreConfig: () => request<CoreConfigResponse>("/core/config"),
+  getCoreConfig: (nodeId?: number) =>
+    request<CoreConfigResponse>(withNodeId("/core/config", nodeId)),
 
-  updateCoreOverride: (override_patch: string) =>
-    request<CoreConfigResponse>("/core/config/override", {
+  updateCoreOverride: (override_patch: string, nodeId?: number) =>
+    request<CoreConfigResponse>(withNodeId("/core/config/override", nodeId), {
       method: "PUT",
       body: { override_patch },
     }),
 
-  // Logs
-  getRecentLogs: (limit = 200) =>
-    request<LogsRecentResponse>(`/logs/recent?limit=${limit}`),
+  // Logs (node-scoped)
+  getRecentLogs: (limit = 200, nodeId?: number) =>
+    request<LogsRecentResponse>(withNodeId(`/logs/recent?limit=${limit}`, nodeId)),
 
-  // Connections
-  getConnections: () => request<ConnectionsResponse>("/connections"),
+  // Connections (node-scoped)
+  getConnections: (nodeId?: number) =>
+    request<ConnectionsResponse>(withNodeId("/connections", nodeId)),
 
-  closeConnection: (id: string) =>
-    request<{ ok?: boolean }>(`/connections/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-    }),
+  closeConnection: (id: string, nodeId?: number) =>
+    request<{ ok?: boolean }>(
+      withNodeId(`/connections/${encodeURIComponent(id)}`, nodeId),
+      { method: "DELETE" },
+    ),
 
   // Settings
   getSettings: () => request<SettingsData>("/settings"),
@@ -256,8 +314,9 @@ export const api = {
       body: payload,
     }),
 
-  // Milestone 2: Certificates & Tools
-  listCertificates: () => request<CertificatesResponse>("/certificates"),
+  // Certificates & Tools (node-scoped)
+  listCertificates: (nodeId?: number) =>
+    request<CertificatesResponse>(withNodeId("/certificates", nodeId)),
 
   createSelfSignedCert: (payload: CreateSelfSignedCertRequest) =>
     request<CertificateItem>("/certificates/self-signed", {
@@ -292,10 +351,10 @@ export const api = {
       method: "POST",
     }),
 
-  probeRealityTarget: (target: string) =>
+  probeRealityTarget: (target: string, nodeId?: number) =>
     request<RealityProbeResult>("/tools/reality-probe", {
       method: "POST",
-      body: { target },
+      body: nodeId ? { target, node_id: nodeId } : { target },
     }),
 
   generateSS2022Key: (method: string) =>
@@ -304,7 +363,7 @@ export const api = {
       body: { method },
     }),
 
-  // Milestone 2: Members
+  // Members (Global)
   listMembers: () => request<MembersResponse>("/members"),
 
   createMember: (payload: CreateMemberRequest) =>
@@ -334,8 +393,9 @@ export const api = {
       method: "DELETE",
     }),
 
-  // Milestone 2: Inbounds
-  listInbounds: () => request<InboundsResponse>("/inbounds"),
+  // Inbounds (node-scoped)
+  listInbounds: (nodeId?: number) =>
+    request<InboundsResponse>(withNodeId("/inbounds", nodeId)),
 
   getInboundDefaults: (protocol: InboundProtocol) =>
     request<InboundDefaultsResponse>(`/inbounds/defaults/${encodeURIComponent(protocol)}`),
@@ -362,13 +422,15 @@ export const api = {
       method: "DELETE",
     }),
 
-  // Milestone 2: Traffic Stats
+  // Traffic Stats (supports node_id filter; omit or 0 for cluster-wide)
   getTrafficStats: (params: {
     range: TrafficRange;
+    node_id?: number;
     member_id?: number;
     inbound_id?: number;
   }) => {
     const qs = new URLSearchParams({ range: params.range });
+    if (params.node_id && params.node_id > 0) qs.set("node_id", String(params.node_id));
     if (params.member_id) qs.set("member_id", String(params.member_id));
     if (params.inbound_id) qs.set("inbound_id", String(params.inbound_id));
     return request<TrafficStatsResponse>(`/traffic/stats?${qs.toString()}`);

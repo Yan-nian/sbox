@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -25,11 +26,20 @@ type contextKey string
 
 const ctxKeyUsername contextKey = "username"
 
-// Server handles dynamic Web Base Path gating, REST/SSE APIs, and embedded SPA serving.
+func strconvFormatInt(v int64) string {
+	return strconv.FormatInt(v, 10)
+}
+
+func newBytesReader(b []byte) *bytes.Reader {
+	return bytes.NewReader(b)
+}
+
+// Server handles dynamic Web Base Path gating, REST/SSE APIs, Agent WS, and embedded SPA serving.
 type Server struct {
 	store             *store.Store
 	tokens            *auth.TokenManager
 	limiter           *auth.LoginRateLimiter
+	hub               ClusterHub
 	core              CoreManager
 	telemetry         TelemetryHub
 	staticFS          fs.FS
@@ -61,10 +71,16 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		cfg.StartedAt = time.Now().UTC()
 	}
 
+	hub := cfg.Hub
+	if hub == nil {
+		hub = newFallbackHub(cfg.DataDir, cfg.PanelVersion, cfg.StartedAt, cfg.Core, cfg.Telemetry)
+	}
+
 	s := &Server{
 		store:             cfg.Store,
 		tokens:            cfg.Tokens,
 		limiter:           cfg.RateLimiter,
+		hub:               hub,
 		core:              cfg.Core,
 		telemetry:         cfg.Telemetry,
 		staticFS:          cfg.StaticFS,
@@ -123,7 +139,10 @@ func (s *Server) buildAPIRouter() chi.Router {
 		r.Post("/auth/login", s.handleAuthLogin)
 		r.Post("/auth/logout", s.handleAuthLogout)
 
-		// Authenticated routes
+		// Milestone 3: Reverse-connect Agent WebSocket (token-authenticated inside hub, NOT admin JWT)
+		r.Get("/agent/ws", s.hub.HandleAgentWS)
+
+		// Authenticated admin routes
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireAuth)
 
@@ -131,6 +150,14 @@ func (s *Server) buildAPIRouter() chi.Router {
 			r.Post("/auth/totp/setup", s.handleTOTPSetup)
 			r.Post("/auth/totp/enable", s.handleTOTPEnable)
 			r.Post("/auth/totp/disable", s.handleTOTPDisable)
+
+			// Milestone 3: Multi-Node Cluster Management
+			r.Get("/nodes", s.handleListNodes)
+			r.Post("/nodes", s.handleCreateNode)
+			r.Put("/nodes/{id}", s.handleUpdateNode)
+			r.Post("/nodes/{id}/reset-token", s.handleResetNodeToken)
+			r.Delete("/nodes/{id}", s.handleDeleteNode)
+			r.Post("/nodes/upgrade-all", s.handleUpgradeAllNodes)
 
 			r.Get("/dashboard/summary", s.handleDashboardSummary)
 			r.Get("/dashboard/stream", s.handleDashboardStream)
@@ -156,7 +183,7 @@ func (s *Server) buildAPIRouter() chi.Router {
 			r.Get("/settings", s.handleGetSettings)
 			r.Put("/settings", s.handleUpdateSettings)
 
-			// Milestone 2: Certificates & Reality/SS2022 Tools
+			// Milestone 2/3: Certificates & Reality/SS2022 Tools (node-scoped)
 			r.Get("/certificates", s.handleListCertificates)
 			r.Post("/certificates/self-signed", s.handleCreateSelfSignedCert)
 			r.Post("/certificates/external", s.handleCreateExternalCert)
@@ -168,7 +195,7 @@ func (s *Server) buildAPIRouter() chi.Router {
 			r.Post("/tools/reality-probe", s.handleToolRealityProbe)
 			r.Post("/tools/ss2022-key", s.handleToolSS2022Key)
 
-			// Milestone 2: Members
+			// Milestone 2/3: Global Members (changes sync to all online nodes)
 			r.Get("/members", s.handleListMembers)
 			r.Post("/members", s.handleCreateMember)
 			r.Put("/members/{id}", s.handleUpdateMember)
@@ -176,7 +203,7 @@ func (s *Server) buildAPIRouter() chi.Router {
 			r.Post("/members/{id}/reset-credentials", s.handleResetMemberCredentials)
 			r.Delete("/members/{id}", s.handleDeleteMember)
 
-			// Milestone 2: Multi-Protocol Inbounds
+			// Milestone 2/3: Multi-Protocol Inbounds (node-scoped)
 			r.Get("/inbounds", s.handleListInbounds)
 			r.Get("/inbounds/defaults/{protocol}", s.handleInboundDefaults)
 			r.Post("/inbounds", s.handleCreateInbound)
@@ -184,7 +211,7 @@ func (s *Server) buildAPIRouter() chi.Router {
 			r.Post("/inbounds/{id}/toggle", s.handleToggleInbound)
 			r.Delete("/inbounds/{id}", s.handleDeleteInbound)
 
-			// Milestone 2: Historical Traffic Stats
+			// Milestone 2/3: Historical Traffic Stats (cluster-wide or node-scoped)
 			r.Get("/traffic/stats", s.handleTrafficStats)
 			r.Post("/traffic/reset", s.handleTrafficReset)
 		})

@@ -2,6 +2,8 @@ import { useState } from "react";
 import {
   Activity,
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
   ArrowUpRight,
   Check,
   Copy,
@@ -11,15 +13,18 @@ import {
   Play,
   RefreshCw,
   RotateCw,
+  Server,
   Square,
   Timer,
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
-import { formatBytes, formatUptime } from "@/lib/format";
+import { formatBytes, formatSpeed, formatUptime } from "@/lib/format";
+import { useNode } from "@/contexts/NodeContext";
 import { useToast } from "@/components/ui/Toast";
 import { Badge, Button, Panel, StatusDot } from "@/components/ui/primitives";
 import { ThroughputChart } from "@/components/ThroughputChart";
 import { TrafficHistoryPanel } from "@/components/TrafficHistoryPanel";
+import { NodeScopeBanner } from "@/components/NodeScopeBanner";
 import type { DashboardLiveState } from "@/hooks/useDashboardStream";
 import type { AppRoute } from "@/components/AppShell";
 
@@ -29,10 +34,13 @@ interface DashboardPageProps {
 }
 
 export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
-  const { core, metrics, system, history, connected, refresh } = live;
+  const { core, metrics, system, cluster, history, connected, refresh } = live;
+  const { activeNodeId, activeNode } = useNode();
   const toast = useToast();
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  const nodeOffline = activeNode ? !activeNode.online : false;
 
   const runCoreAction = async (
     action: "start" | "stop" | "reload" | "restart",
@@ -40,10 +48,10 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
   ) => {
     setBusyAction(action);
     try {
-      if (action === "start") await api.startCore();
-      if (action === "stop") await api.stopCore();
-      if (action === "reload") await api.reloadCore();
-      if (action === "restart") await api.restartCore();
+      if (action === "start") await api.startCore(activeNodeId);
+      if (action === "stop") await api.stopCore(activeNodeId);
+      if (action === "reload") await api.reloadCore(activeNodeId);
+      if (action === "restart") await api.restartCore(activeNodeId);
       toast.success(`已${label}`);
       await refresh();
     } catch (err) {
@@ -65,24 +73,63 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
     }
   };
 
-  const coreRunning = Boolean(core?.running);
-  const binaryMissing = core?.binary_exists === false;
+  const coreRunning = Boolean(core?.running) && !nodeOffline;
+  const binaryMissing = !nodeOffline && core?.binary_exists === false;
 
   return (
     <div className="space-y-5">
+      {/* Node Context & Offline Notice */}
+      <NodeScopeBanner onNavigate={onNavigate} />
+
+      {/* Compact Cluster Overview Bar */}
+      {cluster && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-hairline bg-surface px-4 py-2.5 text-xs">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5">
+            <span className="flex items-center gap-1.5 font-medium text-ink">
+              <Server className="h-3.5 w-3.5 text-accent" />
+              集群总览
+            </span>
+            <span className="font-mono tabular-nums text-ink-secondary">
+              在线节点:{" "}
+              <strong className="text-ok">{cluster.online_nodes}</strong> /{" "}
+              {cluster.total_nodes}
+            </span>
+            <span className="flex items-center gap-1 font-mono tabular-nums text-accent">
+              <ArrowDown className="h-3 w-3" />
+              {formatSpeed(cluster.total_down_speed)}
+            </span>
+            <span className="flex items-center gap-1 font-mono tabular-nums text-uplink">
+              <ArrowUp className="h-3 w-3" />
+              {formatSpeed(cluster.total_up_speed)}
+            </span>
+            <span className="font-mono tabular-nums text-ink-secondary">
+              总连接: <strong className="text-ink">{cluster.total_connections}</strong>
+            </span>
+          </div>
+
+          <Button variant="ghost" size="xs" onClick={() => onNavigate("/nodes")}>
+            节点管理
+            <ArrowUpRight className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
+
       {/* Primary asymmetric hero: Oscilloscope (8 cols) + Core Control Deck (4 cols) */}
       <div className="grid gap-5 lg:grid-cols-12">
         <Panel
           className="lg:col-span-8"
-          title="实时网络吞吐"
-          description="通过本地回环 Clash API 采集 sing-box 实时流量速率"
+          title={activeNode ? `实时网络吞吐 · ${activeNode.name}` : "实时网络吞吐"}
+          description="通过节点本地回环 Clash API 采集 sing-box 实时流量速率"
           actions={
             <div className="flex items-center gap-2">
-              <Badge tone={connected ? "ok" : "warn"}>
-                <StatusDot state={connected ? "ok" : "warn"} className="h-1.5 w-1.5" />
-                {connected ? "SSE 已连接" : "重连中"}
+              <Badge tone={nodeOffline ? "warn" : connected ? "ok" : "warn"}>
+                <StatusDot
+                  state={nodeOffline ? "idle" : connected ? "ok" : "warn"}
+                  className="h-1.5 w-1.5"
+                />
+                {nodeOffline ? "节点离线" : connected ? "SSE 已连接" : "重连中"}
               </Badge>
-              {metrics && (
+              {metrics && !nodeOffline && (
                 <Badge tone={metrics.core_connected ? "accent" : "neutral"}>
                   {metrics.core_connected ? "Clash API 在线" : "Clash API 离线"}
                 </Badge>
@@ -127,34 +174,40 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
           actions={
             <Badge
               tone={
-                core?.upgrading
+                nodeOffline
                   ? "warn"
-                  : coreRunning
-                    ? "ok"
-                    : binaryMissing
-                      ? "warn"
-                      : "neutral"
+                  : core?.upgrading
+                    ? "warn"
+                    : coreRunning
+                      ? "ok"
+                      : binaryMissing
+                        ? "warn"
+                        : "neutral"
               }
             >
               <StatusDot
                 state={
-                  core?.upgrading
-                    ? "warn"
-                    : coreRunning
-                      ? "ok"
-                      : core?.last_error
-                        ? "danger"
-                        : "idle"
+                  nodeOffline
+                    ? "idle"
+                    : core?.upgrading
+                      ? "warn"
+                      : coreRunning
+                        ? "ok"
+                        : core?.last_error
+                          ? "danger"
+                          : "idle"
                 }
                 className="h-1.5 w-1.5"
               />
-              {core?.upgrading
-                ? "升级中"
-                : coreRunning
-                  ? "运行中"
-                  : binaryMissing
-                    ? "未安装"
-                    : "已停止"}
+              {nodeOffline
+                ? "离线"
+                : core?.upgrading
+                  ? "升级中"
+                  : coreRunning
+                    ? "运行中"
+                    : binaryMissing
+                      ? "未安装"
+                      : "已停止"}
             </Badge>
           }
         >
@@ -169,13 +222,13 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
               <div className="mt-2 flex items-baseline justify-between gap-2 text-xs">
                 <span className="text-ink-muted">进程 PID</span>
                 <span className="font-mono text-ink-secondary tabular-nums">
-                  {core?.running && core.pid ? core.pid : "-"}
+                  {coreRunning && core?.pid ? core.pid : "-"}
                 </span>
               </div>
               <div className="mt-1.5 flex items-baseline justify-between gap-2 text-xs">
                 <span className="text-ink-muted">持续运行</span>
                 <span className="font-mono text-ink-secondary tabular-nums">
-                  {core?.running ? formatUptime(core.uptime_sec) : "-"}
+                  {coreRunning ? formatUptime(core?.uptime_sec) : "-"}
                 </span>
               </div>
             </div>
@@ -214,7 +267,7 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
                 variant="danger"
                 size="sm"
                 loading={busyAction === "stop"}
-                disabled={busyAction !== null || core?.upgrading}
+                disabled={busyAction !== null || core?.upgrading || nodeOffline}
                 onClick={() => void runCoreAction("stop", "停止核心")}
               >
                 <Square className="h-3.5 w-3.5" />
@@ -225,7 +278,7 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
                 variant="primary"
                 size="sm"
                 loading={busyAction === "start"}
-                disabled={busyAction !== null || binaryMissing || core?.upgrading}
+                disabled={busyAction !== null || binaryMissing || core?.upgrading || nodeOffline}
                 onClick={() => void runCoreAction("start", "启动核心")}
               >
                 <Play className="h-3.5 w-3.5" />
@@ -237,7 +290,7 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
               variant="secondary"
               size="sm"
               loading={busyAction === "reload"}
-              disabled={busyAction !== null || !coreRunning || core?.upgrading}
+              disabled={busyAction !== null || !coreRunning || core?.upgrading || nodeOffline}
               onClick={() => void runCoreAction("reload", "热重载配置")}
             >
               <RefreshCw className="h-3.5 w-3.5" />
@@ -248,18 +301,14 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
               variant="outline"
               size="sm"
               loading={busyAction === "restart"}
-              disabled={busyAction !== null || binaryMissing || core?.upgrading}
+              disabled={busyAction !== null || binaryMissing || core?.upgrading || nodeOffline}
               onClick={() => void runCoreAction("restart", "重启核心")}
             >
               <RotateCw className="h-3.5 w-3.5" />
               重启核心
             </Button>
 
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => onNavigate("/core")}
-            >
+            <Button variant="ghost" size="sm" onClick={() => onNavigate("/core")}>
               版本与日志
               <ArrowUpRight className="h-3.5 w-3.5" />
             </Button>
@@ -278,7 +327,8 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
             {formatBytes(metrics?.memory_inuse)}
           </div>
           <div className="mt-1 font-mono text-[11px] text-ink-muted tabular-nums">
-            面板进程: {formatBytes(system?.panel_mem_bytes)}
+            {activeNode?.is_local === false ? "Agent 进程" : "面板进程"}:{" "}
+            {formatBytes(system?.panel_mem_bytes)}
           </div>
         </div>
 
@@ -306,14 +356,14 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
 
         <div className="border-hairline p-4 sm:border-t lg:border-t-0">
           <div className="flex items-center justify-between text-xs text-ink-secondary">
-            <span>面板运行时长</span>
+            <span>{activeNode?.is_local === false ? "Agent 运行时长" : "面板运行时长"}</span>
             <Timer className="h-3.5 w-3.5 text-ink-muted" />
           </div>
           <div className="mt-2 font-mono text-xl font-semibold text-ink tabular-nums">
             {formatUptime(system?.panel_uptime_sec)}
           </div>
           <div className="mt-1 font-mono text-[11px] text-ink-muted tabular-nums">
-            核心运行: {core?.running ? formatUptime(core.uptime_sec) : "未运行"}
+            核心运行: {coreRunning ? formatUptime(core?.uptime_sec) : "未运行"}
           </div>
         </div>
 
@@ -331,7 +381,7 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
         </div>
       </div>
 
-      {/* Historical Traffic Trend & Member/Inbound Breakdown */}
+      {/* Historical Traffic Trend & Node/Member/Inbound Breakdown */}
       <TrafficHistoryPanel />
 
       {/* Host identity & Public IP endpoints */}
@@ -358,9 +408,13 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
               </dd>
             </div>
             <div className="flex items-center justify-between gap-4 py-2">
-              <dt className="text-ink-secondary">面板版本与 Go 运行时</dt>
+              <dt className="text-ink-secondary">
+                {activeNode?.is_local === false ? "Agent 版本与运行时" : "面板版本与 Go 运行时"}
+              </dt>
               <dd className="font-mono text-ink">
-                {system ? `${system.panel_version || "dev"} (${system.go_version})` : "-"}
+                {system
+                  ? `${system.panel_version || "dev"}${system.go_version ? ` (${system.go_version})` : ""}`
+                  : "-"}
               </dd>
             </div>
             <div className="flex items-center justify-between gap-4 py-2 last:pb-0">
@@ -377,10 +431,14 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
 
         <Panel
           className="lg:col-span-5"
-          title="公网出口地址"
-          description="用于节点订阅生成时的默认连接地址，可在设置中手动覆盖"
+          title="节点公网出口地址"
+          description="用于节点订阅生成时的默认连接地址，可在节点编辑或设置中手动覆盖"
           actions={
-            <Button variant="ghost" size="xs" onClick={() => onNavigate("/settings")}>
+            <Button
+              variant="ghost"
+              size="xs"
+              onClick={() => onNavigate(activeNode?.is_local === false ? "/nodes" : "/settings")}
+            >
               修改覆写
             </Button>
           }

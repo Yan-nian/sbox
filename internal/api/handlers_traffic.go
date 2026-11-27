@@ -11,6 +11,7 @@ import (
 func (s *Server) handleTrafficStats(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	rangeKey := q.Get("range")
+	nodeID := parseNodeIDQuery(r, 0, true)
 	var memberID, inboundID int64
 	if raw := q.Get("member_id"); raw != "" {
 		if v, err := strconv.ParseInt(raw, 10, 64); err == nil && v > 0 {
@@ -23,7 +24,7 @@ func (s *Server) handleTrafficStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp, err := s.store.GetTrafficStats(r.Context(), rangeKey, memberID, inboundID)
+	resp, err := s.store.GetTrafficStats(r.Context(), rangeKey, nodeID, memberID, inboundID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query traffic stats: "+err.Error())
 		return

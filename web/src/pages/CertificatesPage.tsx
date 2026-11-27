@@ -18,6 +18,7 @@ import {
 import { api, ApiError } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { formatDateTime } from "@/lib/format";
+import { useNode } from "@/contexts/NodeContext";
 import { useToast } from "@/components/ui/Toast";
 import {
   Badge,
@@ -29,6 +30,8 @@ import {
   Select,
   Switch,
 } from "@/components/ui/primitives";
+import { NodeScopeBanner } from "@/components/NodeScopeBanner";
+import type { AppRoute } from "@/components/AppShell";
 import type {
   ACMEChallenge,
   CertificateItem,
@@ -68,10 +71,13 @@ function getDaysRemaining(notAfter?: string): number | null {
   return Math.ceil((ts - Date.now()) / 86400_000);
 }
 
-export function CertificatesPage() {
+export function CertificatesPage({ onNavigate }: { onNavigate?: (route: AppRoute) => void }) {
+  const { activeNodeId, activeNode } = useNode();
   const toast = useToast();
   const [certs, setCerts] = useState<CertificateItem[]>([]);
   const [loading, setLoading] = useState(true);
+
+  const nodeOffline = activeNode ? !activeNode.online : false;
   const [renewingId, setRenewingId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [forceDeleteTarget, setForceDeleteTarget] = useState<{
@@ -121,14 +127,14 @@ export function CertificatesPage() {
   const loadCertificates = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.listCertificates();
+      const res = await api.listCertificates(activeNodeId);
       setCerts(Array.isArray(res.certificates) ? res.certificates : []);
     } catch (err) {
       toast.error("加载证书列表失败", err instanceof ApiError ? err.message : undefined);
     } finally {
       setLoading(false);
     }
-  }, [toast]);
+  }, [activeNodeId, toast]);
 
   useEffect(() => {
     void loadCertificates();
@@ -172,6 +178,7 @@ export function CertificatesPage() {
         const domains = parseDomainList(ssDomains);
         const days = Number.parseInt(ssValidDays, 10);
         await api.createSelfSignedCert({
+          node_id: activeNodeId,
           name,
           domains: domains.length > 0 ? domains : ["localhost"],
           valid_days: Number.isFinite(days) && days > 0 ? days : 3650,
@@ -183,6 +190,7 @@ export function CertificatesPage() {
           return;
         }
         await api.createExternalCert({
+          node_id: activeNodeId,
           name: extName.trim(),
           cert_path: extCertPath.trim(),
           key_path: extKeyPath.trim(),
@@ -208,6 +216,7 @@ export function CertificatesPage() {
           }
         }
         await api.createACMECert({
+          node_id: activeNodeId,
           name: acmeName.trim(),
           email: acmeEmail.trim(),
           domains,
@@ -282,7 +291,7 @@ export function CertificatesPage() {
     if (customTarget) setProbeTarget(customTarget);
     setProbing(true);
     try {
-      const res = await api.probeRealityTarget(target);
+      const res = await api.probeRealityTarget(target, activeNodeId);
       setProbeResult(res);
     } catch (err) {
       toast.error("探测目标域名失败", err instanceof ApiError ? err.message : undefined);
@@ -299,6 +308,11 @@ export function CertificatesPage() {
 
   return (
     <div className="space-y-5">
+      <NodeScopeBanner
+        onNavigate={onNavigate}
+        offlineHint="当前远程节点离线：暂不可在该节点上签发/续期证书或发起 SNI 探测，请待 Agent 上线后操作。"
+      />
+
       {/* Summary Strip */}
       <div className="grid divide-y divide-hairline overflow-hidden rounded-lg border border-hairline bg-surface sm:grid-cols-3 sm:divide-x sm:divide-y-0">
         <div className="px-4 py-3">
@@ -344,6 +358,7 @@ export function CertificatesPage() {
             <Button
               variant="primary"
               size="sm"
+              disabled={nodeOffline}
               onClick={() => {
                 setCreateTab("self_signed");
                 setModalOpen(true);
@@ -503,7 +518,7 @@ export function CertificatesPage() {
                             variant="secondary"
                             size="xs"
                             loading={renewingId === cert.id}
-                            disabled={renewingId !== null || deletingId !== null}
+                            disabled={renewingId !== null || deletingId !== null || nodeOffline}
                             onClick={() => void handleRenew(cert)}
                           >
                             <RefreshCw className="h-3 w-3" />
@@ -600,7 +615,7 @@ export function CertificatesPage() {
                 placeholder="例如 www.microsoft.com:443"
                 className="flex-1 font-mono text-xs"
               />
-              <Button type="submit" variant="secondary" size="md" loading={probing}>
+              <Button type="submit" variant="secondary" size="md" loading={probing} disabled={nodeOffline}>
                 <Radar className="h-3.5 w-3.5" />
                 探测握手
               </Button>

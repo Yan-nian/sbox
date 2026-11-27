@@ -65,6 +65,9 @@ function requiresCert(protocol: InboundProtocol, settings: InboundSettings): boo
 
 interface InboundModalProps {
   open: boolean;
+  nodeId: number;
+  nodeName?: string;
+  nodeOffline?: boolean;
   editing: InboundItem | null;
   certificates: CertificateItem[];
   members: MemberItem[];
@@ -74,6 +77,9 @@ interface InboundModalProps {
 
 export function InboundModal({
   open,
+  nodeId,
+  nodeName,
+  nodeOffline = false,
   editing,
   certificates,
   members,
@@ -198,7 +204,7 @@ export function InboundModal({
     }
     setProbing(true);
     try {
-      const res = await api.probeRealityTarget(`${host}:${port}`);
+      const res = await api.probeRealityTarget(`${host}:${port}`, nodeId);
       setProbeResult(res);
     } catch (err) {
       toast.error("探测目标失败", err instanceof ApiError ? err.message : undefined);
@@ -277,6 +283,7 @@ export function InboundModal({
     }
 
     const payload: SaveInboundRequest = {
+      node_id: editing?.node_id ?? nodeId,
       name: name.trim() || tag.trim() || `${protocol}-${portNum}`,
       tag: tag.trim() || undefined,
       protocol,
@@ -317,8 +324,12 @@ export function InboundModal({
     <Modal
       open={open}
       onClose={() => !saving && onClose()}
-      title={editing ? `编辑入站：${editing.name}` : "新建多协议入站节点"}
-      description="自动编译为现代 sing-box 1.12+ 配置并触发热重载"
+      title={editing ? `编辑入站：${editing.name}` : `新建多协议入站节点${nodeName ? ` · ${nodeName}` : ""}`}
+      description={
+        nodeOffline
+          ? "当前目标节点离线：保存至主控数据库，Agent 重连后将自动编译下发"
+          : "自动编译为现代 sing-box 1.12+ 配置并触发热重载"
+      }
       size="xl"
       footer={
         <>

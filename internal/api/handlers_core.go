@@ -5,17 +5,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/sbox-panel/sbox-panel/internal/auth"
+	"github.com/sbox-panel/sbox-panel/internal/cluster"
 	"github.com/sbox-panel/sbox-panel/internal/configgen"
 	"github.com/sbox-panel/sbox-panel/internal/coremgr"
 	"github.com/sbox-panel/sbox-panel/internal/model"
@@ -23,8 +27,24 @@ import (
 	"github.com/sbox-panel/sbox-panel/internal/telemetry"
 )
 
+func joinNodePath(nodeOS string, parts ...string) string {
+	if strings.EqualFold(nodeOS, "windows") {
+		return filepath.Join(parts...)
+	}
+	// Ensure forward slashes for Linux/macOS agents even when Master runs on Windows.
+	cleaned := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			cleaned = append(cleaned, strings.ReplaceAll(p, `\`, "/"))
+		}
+	}
+	return path.Join(cleaned...)
+}
+
 func (s *Server) buildInboundSpec(
 	ib model.Inbound,
+	nodeOS string,
+	nodeDataDir string,
 	enabledMembers []model.Member,
 	memberByID map[int64]model.Member,
 	certByID map[int64]model.Certificate,
@@ -44,10 +64,19 @@ func (s *Server) buildInboundSpec(
 
 	var certRef *configgen.CertRef
 	if ib.CertificateID != nil && *ib.CertificateID > 0 {
-		if c, ok := certByID[*ib.CertificateID]; ok && c.CertPath != "" && c.KeyPath != "" {
-			certRef = &configgen.CertRef{
-				CertPath: c.CertPath,
-				KeyPath:  c.KeyPath,
+		if c, ok := certByID[*ib.CertificateID]; ok {
+			certPath := c.CertPath
+			keyPath := c.KeyPath
+			if (certPath == "" || keyPath == "") && nodeDataDir != "" {
+				certDir := joinNodePath(nodeOS, nodeDataDir, "certs", fmt.Sprintf("cert-%d", c.ID))
+				certPath = joinNodePath(nodeOS, certDir, "fullchain.pem")
+				keyPath = joinNodePath(nodeOS, certDir, "privkey.pem")
+			}
+			if certPath != "" && keyPath != "" {
+				certRef = &configgen.CertRef{
+					CertPath: certPath,
+					KeyPath:  keyPath,
+				}
 			}
 		}
 	}
@@ -73,21 +102,83 @@ func toMemberCredential(m model.Member) configgen.MemberCredential {
 	}
 }
 
-func (s *Server) buildConfig(ctx context.Context, overridePatchOverride *string) ([]byte, string, error) {
-	logLevel, _ := s.store.GetSettingDefault(ctx, model.SettingLogLevel, "info")
-	overridePatch, _ := s.store.GetSettingDefault(ctx, model.SettingOverridePatch, "")
+func (s *Server) buildConfigForNode(
+	ctx context.Context,
+	nodeID int64,
+	overridePatchOverride *string,
+) ([]byte, string, []cluster.CertFileBundle, error) {
+	if nodeID <= 0 {
+		nodeID = 1
+	}
+
+	node, err := s.store.GetNode(ctx, nodeID)
+	if err != nil {
+		return nil, "", nil, err
+	}
+
+	logLevel := node.LogLevel
+	if logLevel == "" {
+		logLevel = "info"
+	}
+	overridePatch := node.OverridePatch
+	if node.IsLocal {
+		// Backward-compatibility if settings table was edited directly
+		if ll, ok, _ := s.store.GetSetting(ctx, model.SettingLogLevel); ok && ll != "" {
+			logLevel = ll
+		}
+		if op, ok, _ := s.store.GetSetting(ctx, model.SettingOverridePatch); ok && overridePatch == "" && op != "" {
+			overridePatch = op
+		}
+	}
 	if overridePatchOverride != nil {
 		overridePatch = *overridePatchOverride
 	}
 
+	nodeDataDir := node.DataDir
+	nodeOS := node.OS
 	var clashAddr, clashSecret string
-	if s.core != nil {
-		clashAddr, clashSecret = s.core.ClashAPIConfig()
+
+	if node.IsLocal {
+		if nodeDataDir == "" {
+			nodeDataDir = s.dataDir
+		}
+		if nodeOS == "" {
+			nodeOS = runtime.GOOS
+		}
+		if s.core != nil {
+			clashAddr, clashSecret = s.core.ClashAPIConfig()
+		}
+	} else {
+		if s.hub != nil {
+			if ctrl, ok := s.hub.Get(nodeID); ok {
+				if d := ctrl.DataDir(); d != "" {
+					nodeDataDir = d
+				}
+			}
+			if rt, ok := s.hub.RuntimeState(nodeID); ok {
+				if rt.DataDir != "" {
+					nodeDataDir = rt.DataDir
+				}
+				if rt.OS != "" {
+					nodeOS = rt.OS
+				}
+				if rt.Core.ClashAPIAddr != "" {
+					clashAddr = rt.Core.ClashAPIAddr
+				}
+			}
+		}
+		if nodeOS == "" {
+			nodeOS = "linux"
+		}
 	}
 
 	cachePath := ""
-	if s.dataDir != "" {
-		cachePath = filepath.Join(s.dataDir, "cache.db")
+	if nodeDataDir != "" {
+		if node.IsLocal {
+			cachePath = filepath.Join(nodeDataDir, "cache.db")
+		} else {
+			cachePath = joinNodePath(nodeOS, nodeDataDir, "cache", "cache.db")
+		}
 	}
 
 	in := configgen.BuildInput{
@@ -110,22 +201,30 @@ func (s *Server) buildConfig(ctx context.Context, overridePatchOverride *string)
 		}
 	}
 
-	certs, _ := s.store.ListCertificates(ctx)
+	certs, _ := s.store.ListCertificates(ctx, nodeID)
 	certByID := make(map[int64]model.Certificate, len(certs))
+	bundles := make([]cluster.CertFileBundle, 0)
 	for _, c := range certs {
 		certByID[c.ID] = c
+		if c.Type != "external" && len(c.CertPEM) > 0 && len(c.KeyPEM) > 0 {
+			bundles = append(bundles, cluster.CertFileBundle{
+				CertID:  c.ID,
+				CertPEM: []byte(c.CertPEM),
+				KeyPEM:  []byte(c.KeyPEM),
+			})
+		}
 	}
 
-	if inbounds, err := s.store.ListInbounds(ctx); err == nil {
+	if inbounds, err := s.store.ListInbounds(ctx, nodeID); err == nil {
 		for _, ib := range inbounds {
 			if !ib.Enabled {
 				continue
 			}
-			in.Inbounds = append(in.Inbounds, s.buildInboundSpec(ib, enabledMembers, memberByID, certByID))
+			in.Inbounds = append(in.Inbounds, s.buildInboundSpec(ib, nodeOS, nodeDataDir, enabledMembers, memberByID, certByID))
 		}
 	}
 
-	if extras, err := s.store.ListOutboundsExtra(ctx); err == nil {
+	if extras, err := s.store.ListOutboundsExtra(ctx, nodeID); err == nil {
 		for _, ex := range extras {
 			if !ex.Enabled || strings.TrimSpace(ex.ConfigJSON) == "" || strings.TrimSpace(ex.ConfigJSON) == "{}" {
 				continue
@@ -137,7 +236,7 @@ func (s *Server) buildConfig(ctx context.Context, overridePatchOverride *string)
 			}
 		}
 	}
-	if rules, err := s.store.ListRouteRules(ctx); err == nil {
+	if rules, err := s.store.ListRouteRules(ctx, nodeID); err == nil {
 		for _, rr := range rules {
 			if rr.Enabled && strings.TrimSpace(rr.MatchJSON) != "" && strings.TrimSpace(rr.MatchJSON) != "{}" {
 				in.RawRouteRules = append(in.RawRouteRules, json.RawMessage(rr.MatchJSON))
@@ -147,65 +246,112 @@ func (s *Server) buildConfig(ctx context.Context, overridePatchOverride *string)
 
 	cfgBytes, err := configgen.Build(in)
 	if err != nil {
-		return nil, overridePatch, err
+		return nil, overridePatch, nil, err
 	}
-	return cfgBytes, overridePatch, nil
+	return cfgBytes, overridePatch, bundles, nil
 }
 
-// RecompileAndApply compiles the active sing-box configuration from SQLite state
-// and reloads the running sing-box core (or persists config.json when core is stopped).
+// RecompileAndApply compiles and applies configuration for the local master node (id=1).
 func (s *Server) RecompileAndApply(ctx context.Context) error {
-	cfgBytes, _, err := s.buildConfig(ctx, nil)
+	return s.RecompileAndApplyNode(ctx, 1)
+}
+
+// RecompileAndApplyNode compiles configuration for nodeID and pushes/reloads it if the node is online.
+func (s *Server) RecompileAndApplyNode(ctx context.Context, nodeID int64) error {
+	if nodeID <= 0 {
+		nodeID = 1
+	}
+	cfgBytes, _, bundles, err := s.buildConfigForNode(ctx, nodeID, nil)
 	if err != nil {
 		return err
 	}
-	if s.core == nil {
+	if s.hub == nil {
 		return nil
 	}
-	if s.core.Status().Running {
-		if err := s.core.Reload(ctx, cfgBytes); err != nil {
-			if s.telemetry != nil {
-				s.telemetry.PublishLog("error", "panel", "core reload failed after config update: "+err.Error())
-			}
-			return err
-		}
+	ctrl, ok := s.hub.Get(nodeID)
+	if !ok || !ctrl.IsOnline() {
+		return nil
+	}
+	if err := ctrl.ApplyConfig(ctx, cfgBytes, bundles); err != nil {
 		if s.telemetry != nil {
-			s.telemetry.PublishLog("info", "panel", "recompiled sing-box config and reloaded core")
+			s.telemetry.PublishLog("error", "panel", fmt.Sprintf("apply config to node %d failed: %v", nodeID, err))
 		}
-		return nil
+		return err
 	}
-	return s.core.EnsureConfig(cfgBytes)
+	if s.telemetry != nil {
+		s.telemetry.PublishLog("info", "panel", fmt.Sprintf("recompiled and applied sing-box config for node %d", nodeID))
+	}
+	return nil
 }
 
-func (s *Server) currentCoreStatus() coremgr.Status {
-	if s.core == nil {
-		return coremgr.Status{}
+// RecompileAllOnlineNodes propagates global changes (such as member edits) to every online node concurrently.
+func (s *Server) RecompileAllOnlineNodes(ctx context.Context) {
+	if s.hub == nil {
+		return
 	}
-	return s.core.Status()
+	ids := s.hub.OnlineNodeIDs()
+	var wg sync.WaitGroup
+	for _, nid := range ids {
+		wg.Add(1)
+		go func(id int64) {
+			defer wg.Done()
+			_ = s.RecompileAndApplyNode(ctx, id)
+		}(nid)
+	}
+	wg.Wait()
 }
 
-func (s *Server) currentMetrics() telemetry.Snapshot {
-	if s.telemetry == nil {
-		return telemetry.Snapshot{UpdatedAt: time.Now().UTC().Format(time.RFC3339)}
+func (s *Server) nodeSnapshotAndCore(ctx context.Context, nodeID int64, node *model.Node) (coremgr.Status, telemetry.Snapshot, bool) {
+	if s.hub != nil {
+		if rt, ok := s.hub.RuntimeState(nodeID); ok && rt.Online {
+			return rt.Core, rt.Metrics, true
+		}
+		if ctrl, ok := s.hub.Get(nodeID); ok && ctrl.IsOnline() {
+			cs, _ := ctrl.CoreStatus(ctx)
+			return cs, ctrl.Snapshot(), true
+		}
 	}
-	return s.telemetry.Snapshot()
+	version := ""
+	if node != nil {
+		version = node.CoreVersion
+	}
+	return coremgr.Status{
+			Running: false,
+			Version: version,
+		}, telemetry.Snapshot{
+			CoreConnected: false,
+			UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+		}, false
 }
 
 // --- Dashboard ---
 
 func (s *Server) handleDashboardSummary(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	hostname, _ := os.Hostname()
-	var mem runtime.MemStats
-	runtime.ReadMemStats(&mem)
+	nodeID := parseNodeIDQuery(r, 1, false)
+	node, err := s.store.GetNode(ctx, nodeID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "node not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load node")
+		return
+	}
 
-	pubV4, _ := s.store.GetSettingDefault(ctx, model.SettingPublicIPv4, "")
-	pubV6, _ := s.store.GetSettingDefault(ctx, model.SettingPublicIPv6, "")
+	counts, _ := s.store.InboundCountsByNode(ctx)
+	nodeView := s.buildNodeView(*node, counts[node.ID])
+	coreStatus, metrics, _ := s.nodeSnapshotAndCore(ctx, nodeID, node)
+	clusterSummary := s.computeClusterSummary(ctx)
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"core":    s.currentCoreStatus(),
-		"metrics": s.currentMetrics(),
-		"system": map[string]any{
+	var sysInfo map[string]any
+	if node.IsLocal {
+		hostname, _ := os.Hostname()
+		var mem runtime.MemStats
+		runtime.ReadMemStats(&mem)
+		pubV4, _ := s.store.GetSettingDefault(ctx, model.SettingPublicIPv4, node.PublicIPv4)
+		pubV6, _ := s.store.GetSettingDefault(ctx, model.SettingPublicIPv6, node.PublicIPv6)
+		sysInfo = map[string]any{
 			"os":               runtime.GOOS,
 			"arch":             runtime.GOARCH,
 			"hostname":         hostname,
@@ -215,7 +361,27 @@ func (s *Server) handleDashboardSummary(w http.ResponseWriter, r *http.Request) 
 			"panel_mem_bytes":  mem.Alloc,
 			"public_ipv4":      pubV4,
 			"public_ipv6":      pubV6,
-		},
+		}
+	} else {
+		sysInfo = map[string]any{
+			"os":               nodeView.OS,
+			"arch":             nodeView.Arch,
+			"hostname":         nodeView.Hostname,
+			"go_version":       "",
+			"panel_version":    nodeView.AgentVersion,
+			"panel_uptime_sec": nodeView.UptimeSec,
+			"panel_mem_bytes":  nodeView.MemBytes,
+			"public_ipv4":      nodeView.PublicIPv4,
+			"public_ipv6":      nodeView.PublicIPv6,
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node":    nodeView,
+		"core":    coreStatus,
+		"metrics": metrics,
+		"system":  sysInfo,
+		"cluster": clusterSummary,
 	})
 }
 
@@ -226,6 +392,17 @@ func (s *Server) handleDashboardStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	nodeID := parseNodeIDQuery(r, 1, false)
+	node, err := s.store.GetNode(r.Context(), nodeID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "node not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load node")
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -233,9 +410,13 @@ func (s *Server) handleDashboardStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	send := func() bool {
+		coreStatus, metrics, online := s.nodeSnapshotAndCore(r.Context(), nodeID, node)
 		payload, err := json.Marshal(map[string]any{
-			"core":    s.currentCoreStatus(),
-			"metrics": s.currentMetrics(),
+			"node_id": nodeID,
+			"online":  online,
+			"core":    coreStatus,
+			"metrics": metrics,
+			"cluster": s.computeClusterSummary(r.Context()),
 		})
 		if err != nil {
 			return false
@@ -266,104 +447,137 @@ func (s *Server) handleDashboardStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// --- Core Lifecycle & Upgrade ---
+// --- Core Lifecycle & Upgrade (node-scoped) ---
 
-func (s *Server) handleCoreStatus(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.currentCoreStatus())
+func (s *Server) handleCoreStatus(w http.ResponseWriter, r *http.Request) {
+	nodeID := parseNodeIDQuery(r, 1, false)
+	ctrl, _, ok := s.resolveOnlineController(w, r.Context(), nodeID)
+	if !ok {
+		return
+	}
+	status, err := ctrl.CoreStatus(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *Server) handleCoreStart(w http.ResponseWriter, r *http.Request) {
-	if s.core == nil {
-		writeError(w, http.StatusServiceUnavailable, "core manager not initialized")
+	ctx := r.Context()
+	nodeID := parseNodeIDQuery(r, 1, false)
+	ctrl, _, ok := s.resolveOnlineController(w, ctx, nodeID)
+	if !ok {
 		return
 	}
-	cfg, _, err := s.buildConfig(r.Context(), nil)
+	cfg, _, bundles, err := s.buildConfigForNode(ctx, nodeID, nil)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "build config failed: "+err.Error())
 		return
 	}
-	if err := s.core.EnsureConfig(cfg); err != nil {
+	if err := ctrl.ApplyConfig(ctx, cfg, bundles); err != nil {
 		writeError(w, http.StatusInternalServerError, "write config failed: "+err.Error())
 		return
 	}
-	if err := s.core.Start(r.Context()); err != nil {
+	if err := ctrl.StartCore(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, s.core.Status())
+	status, _ := ctrl.CoreStatus(ctx)
+	writeJSON(w, http.StatusOK, status)
 }
 
-func (s *Server) handleCoreStop(w http.ResponseWriter, _ *http.Request) {
-	if s.core == nil {
-		writeError(w, http.StatusServiceUnavailable, "core manager not initialized")
+func (s *Server) handleCoreStop(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	nodeID := parseNodeIDQuery(r, 1, false)
+	ctrl, _, ok := s.resolveOnlineController(w, ctx, nodeID)
+	if !ok {
 		return
 	}
-	if err := s.core.Stop(); err != nil {
+	if err := ctrl.StopCore(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, s.core.Status())
+	status, _ := ctrl.CoreStatus(ctx)
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *Server) handleCoreRestart(w http.ResponseWriter, r *http.Request) {
-	if s.core == nil {
-		writeError(w, http.StatusServiceUnavailable, "core manager not initialized")
+	ctx := r.Context()
+	nodeID := parseNodeIDQuery(r, 1, false)
+	ctrl, _, ok := s.resolveOnlineController(w, ctx, nodeID)
+	if !ok {
 		return
 	}
-	cfg, _, err := s.buildConfig(r.Context(), nil)
+	cfg, _, bundles, err := s.buildConfigForNode(ctx, nodeID, nil)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "build config failed: "+err.Error())
 		return
 	}
-	if err := s.core.EnsureConfig(cfg); err != nil {
+	if err := ctrl.ApplyConfig(ctx, cfg, bundles); err != nil {
 		writeError(w, http.StatusInternalServerError, "write config failed: "+err.Error())
 		return
 	}
-	if err := s.core.Restart(r.Context()); err != nil {
+	if err := ctrl.RestartCore(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, s.core.Status())
+	status, _ := ctrl.CoreStatus(ctx)
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *Server) handleCoreReload(w http.ResponseWriter, r *http.Request) {
-	if s.core == nil {
-		writeError(w, http.StatusServiceUnavailable, "core manager not initialized")
+	ctx := r.Context()
+	nodeID := parseNodeIDQuery(r, 1, false)
+	ctrl, _, ok := s.resolveOnlineController(w, ctx, nodeID)
+	if !ok {
 		return
 	}
-	cfg, _, err := s.buildConfig(r.Context(), nil)
+	cfg, _, bundles, err := s.buildConfigForNode(ctx, nodeID, nil)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "build config failed: "+err.Error())
 		return
 	}
-	if err := s.core.Reload(r.Context(), cfg); err != nil {
+	if err := ctrl.ApplyConfig(ctx, cfg, bundles); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, s.core.Status())
+	status, _ := ctrl.CoreStatus(ctx)
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *Server) handleCoreRollback(w http.ResponseWriter, r *http.Request) {
-	if s.core == nil {
-		writeError(w, http.StatusServiceUnavailable, "core manager not initialized")
+	ctx := r.Context()
+	nodeID := parseNodeIDQuery(r, 1, false)
+	ctrl, _, ok := s.resolveOnlineController(w, ctx, nodeID)
+	if !ok {
 		return
 	}
-	if err := s.core.Rollback(r.Context()); err != nil {
+	if err := ctrl.RollbackCore(ctx); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, s.core.Status())
+	status, _ := ctrl.CoreStatus(ctx)
+	if status.Version != "" {
+		_ = s.store.UpdateNodeRuntimeInfo(ctx, nodeID, store.NodeRuntimeUpdate{CoreVersion: status.Version})
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *Server) handleCoreReleases(w http.ResponseWriter, r *http.Request) {
-	if s.core == nil {
-		writeError(w, http.StatusServiceUnavailable, "core manager not initialized")
+	ctx := r.Context()
+	nodeID := parseNodeIDQuery(r, 1, false)
+	ctrl, node, ok := s.resolveOnlineController(w, ctx, nodeID)
+	if !ok {
 		return
 	}
 	includePre := strings.EqualFold(r.URL.Query().Get("prerelease"), "true")
-	proxyURL, _ := s.store.GetSettingDefault(r.Context(), model.SettingGithubProxy, "")
+	proxyURL := node.GithubProxy
+	if proxyURL == "" && node.IsLocal {
+		proxyURL, _ = s.store.GetSettingDefault(ctx, model.SettingGithubProxy, "")
+	}
 
-	releases, err := s.core.ListReleases(r.Context(), includePre, proxyURL)
+	releases, err := ctrl.ListReleases(ctx, includePre, proxyURL)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "failed to fetch sing-box releases: "+err.Error())
 		return
@@ -377,8 +591,10 @@ func (s *Server) handleCoreReleases(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCoreUpgrade(w http.ResponseWriter, r *http.Request) {
-	if s.core == nil {
-		writeError(w, http.StatusServiceUnavailable, "core manager not initialized")
+	ctx := r.Context()
+	nodeID := parseNodeIDQuery(r, 1, false)
+	ctrl, node, ok := s.resolveOnlineController(w, ctx, nodeID)
+	if !ok {
 		return
 	}
 	var req coremgr.UpgradeOptions
@@ -391,24 +607,40 @@ func (s *Server) handleCoreUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.TrimSpace(req.ProxyURL) == "" {
-		req.ProxyURL, _ = s.store.GetSettingDefault(r.Context(), model.SettingGithubProxy, "")
+		req.ProxyURL = node.GithubProxy
+		if req.ProxyURL == "" && node.IsLocal {
+			req.ProxyURL, _ = s.store.GetSettingDefault(ctx, model.SettingGithubProxy, "")
+		}
 	}
 
-	if cfg, _, err := s.buildConfig(r.Context(), nil); err == nil {
-		_ = s.core.EnsureConfig(cfg)
+	if cfg, _, bundles, err := s.buildConfigForNode(ctx, nodeID, nil); err == nil {
+		_ = ctrl.ApplyConfig(ctx, cfg, bundles)
 	}
 
-	res := s.core.Upgrade(r.Context(), req)
+	res, err := ctrl.UpgradeCore(ctx, req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if res.Success && res.ToVersion != "" {
+		_ = s.store.UpdateNodeRuntimeInfo(ctx, nodeID, store.NodeRuntimeUpdate{CoreVersion: res.ToVersion})
+	}
 	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleCoreUpload(w http.ResponseWriter, r *http.Request) {
-	if s.core == nil {
-		writeError(w, http.StatusServiceUnavailable, "core manager not initialized")
+	ctx := r.Context()
+	nodeID := parseNodeIDQuery(r, 1, false)
+	ctrl, _, ok := s.resolveOnlineController(w, ctx, nodeID)
+	if !ok {
 		return
 	}
-	// Limit upload size to 256 MiB
-	r.Body = http.MaxBytesReader(w, r.Body, 256<<20)
+	// Limit upload size to 48 MiB for remote WS safety, 256 MiB for local
+	maxSize := int64(256 << 20)
+	if !ctrl.IsLocal() {
+		maxSize = 48 << 20
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, "failed to parse multipart upload: "+err.Error())
 		return
@@ -420,16 +652,34 @@ func (s *Server) handleCoreUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	if cfg, _, err := s.buildConfig(r.Context(), nil); err == nil {
-		_ = s.core.EnsureConfig(cfg)
+	data, err := io.ReadAll(file)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read uploaded binary: "+err.Error())
+		return
 	}
 
-	res := s.core.UploadBinary(r.Context(), file, header.Filename)
+	if cfg, _, bundles, err := s.buildConfigForNode(ctx, nodeID, nil); err == nil {
+		_ = ctrl.ApplyConfig(ctx, cfg, bundles)
+	}
+
+	res, err := ctrl.UploadBinary(ctx, header.Filename, data)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if res.Success && res.ToVersion != "" {
+		_ = s.store.UpdateNodeRuntimeInfo(ctx, nodeID, store.NodeRuntimeUpdate{CoreVersion: res.ToVersion})
+	}
 	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleCoreConfig(w http.ResponseWriter, r *http.Request) {
-	cfgBytes, overridePatch, err := s.buildConfig(r.Context(), nil)
+	nodeID := parseNodeIDQuery(r, 1, false)
+	cfgBytes, overridePatch, _, err := s.buildConfigForNode(r.Context(), nodeID, nil)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "node not found")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "build config failed: "+err.Error())
 		return
@@ -442,6 +692,17 @@ func (s *Server) handleCoreConfig(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCoreConfigOverride(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	nodeID := parseNodeIDQuery(r, 1, false)
+	node, err := s.store.GetNode(ctx, nodeID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "node not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load node")
+		return
+	}
+
 	var req struct {
 		OverridePatch string `json:"override_patch"`
 	}
@@ -459,14 +720,14 @@ func (s *Server) handleCoreConfigOverride(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	cfgBytes, _, err := s.buildConfig(ctx, &patch)
+	cfgBytes, _, bundles, err := s.buildConfigForNode(ctx, nodeID, &patch)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "merge override_patch failed: "+err.Error())
 		return
 	}
 
-	// Pre-check candidate config with sing-box binary if installed
-	if s.core != nil {
+	// Pre-check candidate config with local sing-box binary if installed for local node
+	if node.IsLocal && s.core != nil {
 		st := s.core.Status()
 		if st.BinaryExists && st.BinaryPath != "" {
 			tmpFile, err := os.CreateTemp("", "sbox-override-check-*.json")
@@ -489,20 +750,21 @@ func (s *Server) handleCoreConfigOverride(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	if err := s.store.SetSetting(ctx, model.SettingOverridePatch, patch); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save override_patch")
+	node.OverridePatch = patch
+	if err := s.store.UpdateNode(ctx, node); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save node override_patch")
 		return
 	}
+	if node.IsLocal {
+		_ = s.store.SetSetting(ctx, model.SettingOverridePatch, patch)
+	}
 
-	if s.core != nil {
-		st := s.core.Status()
-		if st.Running {
-			if err := s.core.Reload(ctx, cfgBytes); err != nil {
-				writeError(w, http.StatusInternalServerError, "saved override but failed to reload core: "+err.Error())
+	if s.hub != nil {
+		if ctrl, ok := s.hub.Get(nodeID); ok && ctrl.IsOnline() {
+			if err := ctrl.ApplyConfig(ctx, cfgBytes, bundles); err != nil {
+				writeError(w, http.StatusInternalServerError, "saved override but failed to apply config: "+err.Error())
 				return
 			}
-		} else {
-			_ = s.core.EnsureConfig(cfgBytes)
 		}
 	}
 
@@ -512,9 +774,14 @@ func (s *Server) handleCoreConfigOverride(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// --- Logs ---
+// --- Logs (node-scoped) ---
 
 func (s *Server) handleLogsRecent(w http.ResponseWriter, r *http.Request) {
+	nodeID := parseNodeIDQuery(r, 1, false)
+	ctrl, _, ok := s.resolveOnlineController(w, r.Context(), nodeID)
+	if !ok {
+		return
+	}
 	limit := 200
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
@@ -524,10 +791,7 @@ func (s *Server) handleLogsRecent(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	var logs []telemetry.LogEntry
-	if s.telemetry != nil {
-		logs = s.telemetry.RecentLogs(limit)
-	}
+	logs := ctrl.RecentLogs(limit)
 	if logs == nil {
 		logs = []telemetry.LogEntry{}
 	}
@@ -542,6 +806,13 @@ func (s *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
+
+	nodeID := parseNodeIDQuery(r, 1, false)
+	ctrl, _, ok := s.resolveOnlineController(w, r.Context(), nodeID)
+	if !ok {
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -550,12 +821,7 @@ func (s *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprint(w, ": connected\n\n")
 	flusher.Flush()
 
-	if s.telemetry == nil {
-		<-r.Context().Done()
-		return
-	}
-
-	ch, unsub := s.telemetry.SubscribeLogs()
+	ch, unsub := ctrl.SubscribeLogs()
 	defer unsub()
 
 	keepalive := time.NewTicker(25 * time.Second)
@@ -586,20 +852,17 @@ func (s *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// --- Connections ---
+// --- Connections (node-scoped) ---
 
 func (s *Server) handleConnectionsList(w http.ResponseWriter, r *http.Request) {
-	var conns []telemetry.ConnectionItem
-	if s.telemetry != nil {
-		list, err := s.telemetry.Connections(r.Context())
-		if err != nil {
-			// If core is stopped or unreachable, return empty list cleanly rather than breaking the page.
-			conns = []telemetry.ConnectionItem{}
-		} else {
-			conns = list
-		}
+	ctx := r.Context()
+	nodeID := parseNodeIDQuery(r, 1, false)
+	ctrl, _, ok := s.resolveOnlineController(w, ctx, nodeID)
+	if !ok {
+		return
 	}
-	if conns == nil {
+	conns, err := ctrl.Connections(ctx)
+	if err != nil || conns == nil {
 		conns = []telemetry.ConnectionItem{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -608,16 +871,18 @@ func (s *Server) handleConnectionsList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConnectionClose(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	nodeID := parseNodeIDQuery(r, 1, false)
+	ctrl, _, ok := s.resolveOnlineController(w, ctx, nodeID)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	if strings.TrimSpace(id) == "" {
 		writeError(w, http.StatusBadRequest, "connection id is required")
 		return
 	}
-	if s.telemetry == nil {
-		writeError(w, http.StatusServiceUnavailable, "telemetry hub unavailable")
-		return
-	}
-	if err := s.telemetry.CloseConnection(r.Context(), id); err != nil {
+	if err := ctrl.CloseConnection(ctx, id); err != nil {
 		writeError(w, http.StatusBadGateway, "failed to close connection: "+err.Error())
 		return
 	}
@@ -739,7 +1004,6 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	if basePathChanged {
 		s.SetBasePath(current.WebBasePath)
-		// Re-issue auth cookie scoped to the new base path so the browser stays logged in after redirect.
 		if token := auth.ExtractToken(r); token != "" {
 			auth.ClearAuthCookie(w, oldBasePath, isRequestSecure(r))
 			auth.SetAuthCookie(w, token, current.WebBasePath, isRequestSecure(r), s.tokens.TTL())

@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, buildSSEUrl } from "@/lib/api";
 import type {
+  ClusterSummary,
   CoreStatus,
   DashboardStreamPayload,
   MetricsSnapshot,
+  NodeView,
   SystemInfo,
 } from "@/types/api";
 
@@ -25,42 +27,54 @@ function createEmptyHistory(): ThroughputPoint[] {
 }
 
 export interface DashboardLiveState {
+  nodeId: number;
   loading: boolean;
   connected: boolean;
   error: string | null;
+  node: NodeView | null;
   core: CoreStatus | null;
   metrics: MetricsSnapshot | null;
   system: SystemInfo | null;
+  cluster: ClusterSummary | null;
   history: ThroughputPoint[];
   refresh: () => Promise<void>;
 }
 
-export function useDashboardStream(enabled: boolean): DashboardLiveState {
+export function useDashboardStream(enabled: boolean, nodeId: number): DashboardLiveState {
   const [loading, setLoading] = useState(true);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [node, setNode] = useState<NodeView | null>(null);
   const [core, setCore] = useState<CoreStatus | null>(null);
   const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null);
   const [system, setSystem] = useState<SystemInfo | null>(null);
+  const [cluster, setCluster] = useState<ClusterSummary | null>(null);
   const [history, setHistory] = useState<ThroughputPoint[]>(() => createEmptyHistory());
   const sourceRef = useRef<EventSource | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const data = await api.getDashboardSummary();
+      const data = await api.getDashboardSummary(nodeId);
+      setNode(data.node ?? null);
       setCore(data.core);
       setMetrics(data.metrics);
       setSystem(data.system);
+      if (data.cluster) setCluster(data.cluster);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载状态失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [nodeId]);
 
   useEffect(() => {
     if (!enabled) return;
+
+    // Reset transient state when switching active node
+    setLoading(true);
+    setConnected(false);
+    setHistory(createEmptyHistory());
     void refresh();
 
     let closed = false;
@@ -68,7 +82,7 @@ export function useDashboardStream(enabled: boolean): DashboardLiveState {
 
     const connect = () => {
       if (closed) return;
-      const es = new EventSource(buildSSEUrl("/dashboard/stream"));
+      const es = new EventSource(buildSSEUrl("/dashboard/stream", nodeId));
       sourceRef.current = es;
 
       es.onopen = () => {
@@ -80,6 +94,7 @@ export function useDashboardStream(enabled: boolean): DashboardLiveState {
         try {
           const payload = JSON.parse(ev.data) as DashboardStreamPayload;
           if (payload.core) setCore(payload.core);
+          if (payload.cluster) setCluster(payload.cluster);
           if (payload.metrics) {
             setMetrics(payload.metrics);
             setHistory((prev) => [
@@ -117,7 +132,19 @@ export function useDashboardStream(enabled: boolean): DashboardLiveState {
       sourceRef.current?.close();
       sourceRef.current = null;
     };
-  }, [enabled, refresh]);
+  }, [enabled, nodeId, refresh]);
 
-  return { loading, connected, error, core, metrics, system, history, refresh };
+  return {
+    nodeId,
+    loading,
+    connected,
+    error,
+    node,
+    core,
+    metrics,
+    system,
+    cluster,
+    history,
+    refresh,
+  };
 }

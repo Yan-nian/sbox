@@ -16,22 +16,29 @@ import {
 import { api, ApiError } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { formatBytes, formatDateTime, formatUptime } from "@/lib/format";
+import { useNode } from "@/contexts/NodeContext";
 import { useToast } from "@/components/ui/Toast";
 import { Badge, Button, Input, Panel, StatusDot } from "@/components/ui/primitives";
 import { LogTerminal } from "@/components/LogTerminal";
 import { CoreConfigEditor } from "@/components/CoreConfigEditor";
+import { NodeScopeBanner } from "@/components/NodeScopeBanner";
 import type { DashboardLiveState } from "@/hooks/useDashboardStream";
+import type { AppRoute } from "@/components/AppShell";
 import type { ReleaseInfo, UpgradeResult } from "@/types/api";
 
 type CoreTab = "logs" | "versions" | "config";
 
 interface CoreLogsPageProps {
   live: DashboardLiveState;
+  onNavigate?: (route: AppRoute) => void;
 }
 
-export function CoreLogsPage({ live }: CoreLogsPageProps) {
+export function CoreLogsPage({ live, onNavigate }: CoreLogsPageProps) {
   const { core, refresh } = live;
+  const { activeNodeId, activeNode } = useNode();
   const toast = useToast();
+
+  const nodeOffline = activeNode ? !activeNode.online : false;
 
   const [activeTab, setActiveTab] = useState<CoreTab>(
     core?.binary_exists === false ? "versions" : "logs",
@@ -54,22 +61,38 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const loadReleases = useCallback(async (prerelease: boolean) => {
-    setLoadingReleases(true);
+  const loadReleases = useCallback(
+    async (prerelease: boolean) => {
+      if (nodeOffline) {
+        setReleases([]);
+        setReleaseError("当前远程节点离线，无法查询对应架构的 Release 发行包。");
+        return;
+      }
+      setLoadingReleases(true);
+      setReleaseError(null);
+      try {
+        const res = await api.listReleases(prerelease, activeNodeId);
+        setReleases(Array.isArray(res.releases) ? res.releases : []);
+      } catch (err) {
+        setReleaseError(
+          err instanceof ApiError
+            ? err.message
+            : "无法拉取 GitHub Releases，请检查网络或在设置中配置 GitHub 加速代理。",
+        );
+      } finally {
+        setLoadingReleases(false);
+      }
+    },
+    [activeNodeId, nodeOffline],
+  );
+
+  // Reset per-node release cache & diagnostics when active node changes
+  useEffect(() => {
+    setReleases([]);
     setReleaseError(null);
-    try {
-      const res = await api.listReleases(prerelease);
-      setReleases(Array.isArray(res.releases) ? res.releases : []);
-    } catch (err) {
-      setReleaseError(
-        err instanceof ApiError
-          ? err.message
-          : "无法拉取 GitHub Releases，请检查网络或在设置中配置 GitHub 加速代理。",
-      );
-    } finally {
-      setLoadingReleases(false);
-    }
-  }, []);
+    setUpgradeResult(null);
+    setConfirmRollback(false);
+  }, [activeNodeId]);
 
   useEffect(() => {
     if (activeTab === "versions" && releases.length === 0 && !releaseError) {
@@ -88,12 +111,12 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
   ) => {
     setBusyAction(action);
     try {
-      if (action === "start") await api.startCore();
-      if (action === "stop") await api.stopCore();
-      if (action === "reload") await api.reloadCore();
-      if (action === "restart") await api.restartCore();
+      if (action === "start") await api.startCore(activeNodeId);
+      if (action === "stop") await api.stopCore(activeNodeId);
+      if (action === "reload") await api.reloadCore(activeNodeId);
+      if (action === "restart") await api.restartCore(activeNodeId);
       if (action === "rollback") {
-        await api.rollbackCore();
+        await api.rollbackCore(activeNodeId);
         setConfirmRollback(false);
       }
       toast.success(`已${label}`);
@@ -109,11 +132,14 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
     setUpgradingTag(rel.tag_name);
     setUpgradeResult(null);
     try {
-      const res = await api.upgradeCore({
-        tag_name: rel.tag_name,
-        download_url: rel.download_url || undefined,
-        proxy_url: proxyOverride.trim() || undefined,
-      });
+      const res = await api.upgradeCore(
+        {
+          tag_name: rel.tag_name,
+          download_url: rel.download_url || undefined,
+          proxy_url: proxyOverride.trim() || undefined,
+        },
+        activeNodeId,
+      );
       setUpgradeResult(res);
       if (res.success) {
         toast.success(`已切换至 ${res.to_version || rel.tag_name}`, res.message);
@@ -136,7 +162,7 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
     setUploading(true);
     setUpgradeResult(null);
     try {
-      const res = await api.uploadCoreBinary(selectedFile);
+      const res = await api.uploadCoreBinary(selectedFile, activeNodeId);
       setUpgradeResult(res);
       if (res.success) {
         toast.success("自定义核心替换成功", res.message);
@@ -157,15 +183,21 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
+    if (nodeOffline) return;
     const file = e.dataTransfer.files?.[0];
     if (file) setSelectedFile(file);
   };
 
-  const coreRunning = Boolean(core?.running);
+  const coreRunning = Boolean(core?.running) && !nodeOffline;
   const busyUpgrade = upgradingTag !== null || uploading || Boolean(core?.upgrading);
 
   return (
     <div className="space-y-5">
+      <NodeScopeBanner
+        onNavigate={onNavigate}
+        offlineHint="当前远程节点离线，无法实时控制核心、拉取日志或上传二进制；但您仍可预览和编辑该节点的 JSON 覆写补丁（重连后自动同步）。"
+      />
+
       {/* Top Core Status & Quick Lifecycle Bar */}
       <Panel bodyClassName="p-4">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -173,25 +205,27 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
             <div className="flex items-center gap-2.5">
               <StatusDot
                 state={
-                  busyUpgrade
-                    ? "warn"
-                    : coreRunning
-                      ? "ok"
-                      : core?.last_error
-                        ? "danger"
-                        : "idle"
+                  nodeOffline
+                    ? "idle"
+                    : busyUpgrade
+                      ? "warn"
+                      : coreRunning
+                        ? "ok"
+                        : core?.last_error
+                          ? "danger"
+                          : "idle"
                 }
                 className="h-2.5 w-2.5"
               />
               <div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="font-mono text-base font-semibold text-ink">
-                    {core?.version || "sing-box 未安装"}
+                    {core?.version || (nodeOffline ? "节点离线" : "sing-box 未安装")}
                   </span>
-                  <Badge tone={coreRunning ? "ok" : "neutral"}>
-                    {coreRunning ? `PID ${core?.pid}` : "未运行"}
+                  <Badge tone={nodeOffline ? "warn" : coreRunning ? "ok" : "neutral"}>
+                    {nodeOffline ? "离线" : coreRunning ? `PID ${core?.pid}` : "未运行"}
                   </Badge>
-                  {core?.has_backup && (
+                  {core?.has_backup && !nodeOffline && (
                     <Badge tone="accent">存在可回滚备份</Badge>
                   )}
                 </div>
@@ -209,7 +243,7 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
                 variant="danger"
                 size="sm"
                 loading={busyAction === "stop"}
-                disabled={busyAction !== null || busyUpgrade}
+                disabled={busyAction !== null || busyUpgrade || nodeOffline}
                 onClick={() => void runLifecycle("stop", "停止核心")}
               >
                 <Square className="h-3.5 w-3.5" />
@@ -220,7 +254,7 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
                 variant="primary"
                 size="sm"
                 loading={busyAction === "start"}
-                disabled={busyAction !== null || !core?.binary_exists || busyUpgrade}
+                disabled={busyAction !== null || !core?.binary_exists || busyUpgrade || nodeOffline}
                 onClick={() => void runLifecycle("start", "启动核心")}
               >
                 <Play className="h-3.5 w-3.5" />
@@ -232,7 +266,7 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
               variant="secondary"
               size="sm"
               loading={busyAction === "reload"}
-              disabled={busyAction !== null || !coreRunning || busyUpgrade}
+              disabled={busyAction !== null || !coreRunning || busyUpgrade || nodeOffline}
               onClick={() => void runLifecycle("reload", "热重载配置")}
             >
               <RefreshCw className="h-3.5 w-3.5" />
@@ -243,14 +277,14 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
               variant="outline"
               size="sm"
               loading={busyAction === "restart"}
-              disabled={busyAction !== null || !core?.binary_exists || busyUpgrade}
+              disabled={busyAction !== null || !core?.binary_exists || busyUpgrade || nodeOffline}
               onClick={() => void runLifecycle("restart", "重启核心")}
             >
               <RotateCw className="h-3.5 w-3.5" />
               重启
             </Button>
 
-            {core?.has_backup && (
+            {core?.has_backup && !nodeOffline && (
               confirmRollback ? (
                 <div className="flex items-center gap-1.5 rounded-md border border-warn/45 bg-warn/10 px-2 py-1">
                   <span className="text-xs text-warn">确认回滚至上一备份？</span>
@@ -378,10 +412,10 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
       {/* Tab content */}
       {activeTab === "logs" && (
         <Panel
-          title="实时核心与面板日志"
-          description="通过 SSE 实时接收 sing-box 与面板守护器输出，支持按级别和关键词过滤"
+          title={activeNode ? `实时日志流 · ${activeNode.name}` : "实时核心与面板日志"}
+          description="通过 SSE 实时接收目标节点 sing-box 与 Agent/面板守护器输出，支持按级别和关键词过滤"
         >
-          <LogTerminal />
+          <LogTerminal nodeId={activeNodeId} offline={nodeOffline} />
         </Panel>
       )}
 
@@ -397,6 +431,7 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
                 <div className="inline-flex rounded-md border border-hairline bg-recessed p-0.5 text-xs">
                   <button
                     type="button"
+                    disabled={nodeOffline}
                     onClick={() => handleTogglePrerelease(false)}
                     className={cn(
                       "rounded px-2.5 py-1 transition-colors",
@@ -409,6 +444,7 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
                   </button>
                   <button
                     type="button"
+                    disabled={nodeOffline}
                     onClick={() => handleTogglePrerelease(true)}
                     className={cn(
                       "rounded px-2.5 py-1 transition-colors",
@@ -424,6 +460,7 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
                 <Button
                   variant="outline"
                   size="sm"
+                  disabled={nodeOffline}
                   loading={loadingReleases}
                   onClick={() => void loadReleases(includePrerelease)}
                 >
@@ -437,7 +474,8 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
               <Input
                 value={proxyOverride}
                 onChange={(e) => setProxyOverride(e.target.value)}
-                placeholder="可选：临时 GitHub 下载加速前缀（如 https://ghfast.top/），留空沿用系统设置"
+                disabled={nodeOffline}
+                placeholder="可选：临时 GitHub 下载加速前缀（如 https://ghfast.top/），留空沿用节点/系统设置"
                 className="h-8 flex-1 font-mono text-xs"
               />
             </div>
@@ -468,7 +506,9 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
                   ) : releases.length === 0 ? (
                     <tr>
                       <td colSpan={4} className="px-3 py-8 text-center text-ink-muted">
-                        暂无匹配当前架构的版本记录，请点击刷新或检查网络代理设置。
+                        {nodeOffline
+                          ? "当前节点离线，无法查询并下发升级"
+                          : "暂无匹配当前架构的版本记录，请点击刷新或检查网络代理设置。"}
                       </td>
                     </tr>
                   ) : (
@@ -509,7 +549,7 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
                               variant={isCurrent ? "ghost" : "secondary"}
                               size="xs"
                               loading={upgradingTag === rel.tag_name}
-                              disabled={busyUpgrade || !rel.download_url}
+                              disabled={busyUpgrade || !rel.download_url || nodeOffline}
                               onClick={() => void handleUpgrade(rel)}
                             >
                               <Download className="h-3 w-3" />
@@ -534,34 +574,37 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
             <div
               onDragOver={(e) => {
                 e.preventDefault();
-                setDragOver(true);
+                if (!nodeOffline) setDragOver(true);
               }}
               onDragLeave={() => setDragOver(false)}
               onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => !nodeOffline && fileInputRef.current?.click()}
               className={cn(
-                "flex cursor-pointer flex-col items-center justify-center rounded-md border border-dashed p-6 text-center transition-colors",
-                dragOver
-                  ? "border-accent bg-accent-muted"
-                  : "border-hairline-strong bg-recessed hover:border-accent/60",
+                "flex flex-col items-center justify-center rounded-md border border-dashed p-6 text-center transition-colors",
+                nodeOffline
+                  ? "cursor-not-allowed border-hairline bg-recessed opacity-55"
+                  : dragOver
+                    ? "cursor-pointer border-accent bg-accent-muted"
+                    : "cursor-pointer border-hairline-strong bg-recessed hover:border-accent/60",
               )}
             >
               <Upload className="h-7 w-7 text-ink-muted" />
               <p className="mt-2.5 text-xs font-medium text-ink">
-                拖拽核心文件到此处，或点击选择文件
+                {nodeOffline ? "节点离线，暂不可上传" : "拖拽核心文件到此处，或点击选择文件"}
               </p>
               <p className="mt-1 text-[11px] text-ink-muted">
-                上传后自动执行 config 语法预检与 5 秒探活校验
+                上传后自动推送至目标节点执行预检与 5 秒探活校验
               </p>
               <input
                 ref={fileInputRef}
                 type="file"
+                disabled={nodeOffline}
                 className="hidden"
                 onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
               />
             </div>
 
-            {selectedFile && (
+            {selectedFile && !nodeOffline && (
               <div className="mt-3 rounded-md border border-hairline bg-recessed p-3 text-xs">
                 <div className="truncate font-mono font-medium text-ink">
                   {selectedFile.name}
@@ -595,7 +638,7 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
             <div className="mt-4 space-y-1.5 border-t border-hairline pt-3 text-[11px] text-ink-muted">
               <p>升级安全保障流程：</p>
               <ol className="list-inside list-decimal space-y-1">
-                <li>解压并校验可执行权限至临时 staging 路径</li>
+                <li>解压并校验可执行权限至节点临时 staging 路径</li>
                 <li>调用新版核心执行 check 预检现有 config.json</li>
                 <li>备份原二进制为 sing-box.bak 后原子替换启动</li>
                 <li>5 秒内探活 Clash API，失败自动恢复原版</li>
@@ -605,7 +648,7 @@ export function CoreLogsPage({ live }: CoreLogsPageProps) {
         </div>
       )}
 
-      {activeTab === "config" && <CoreConfigEditor />}
+      {activeTab === "config" && <CoreConfigEditor nodeId={activeNodeId} />}
     </div>
   );
 }

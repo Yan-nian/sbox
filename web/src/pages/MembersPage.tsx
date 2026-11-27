@@ -223,8 +223,13 @@ export function MembersPage() {
       </div>
 
       <Panel
-        title="成员凭据与访问控制"
-        description="每位成员拥有独立 UUID、密码、SS-2022 密钥与订阅 Token；启停或轮换凭据自动热重载核心"
+        title={
+          <span className="flex flex-wrap items-center gap-2">
+            <span>成员凭据与访问控制</span>
+            <Badge tone="accent">全局成员 · 自动同步全部在线节点</Badge>
+          </span>
+        }
+        description="全局共享成员池：每位成员拥有独立 UUID、密码、SS-2022 密钥与订阅 Token；启停或轮换凭据将自动编译并推送至集群内所有在线节点"
         actions={
           <div className="flex items-center gap-2">
             <Button

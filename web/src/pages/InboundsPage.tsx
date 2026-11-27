@@ -12,6 +12,7 @@ import {
 import { api, ApiError } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { formatBytes } from "@/lib/format";
+import { useNode } from "@/contexts/NodeContext";
 import { useToast } from "@/components/ui/Toast";
 import {
   Badge,
@@ -21,6 +22,8 @@ import {
   Switch,
 } from "@/components/ui/primitives";
 import { InboundModal, PROTOCOL_OPTIONS } from "@/components/InboundModal";
+import { NodeScopeBanner } from "@/components/NodeScopeBanner";
+import type { AppRoute } from "@/components/AppShell";
 import type { CertificateItem, InboundItem, MemberItem } from "@/types/api";
 
 function describeSecurity(ib: InboundItem, certMap: Map<number, CertificateItem>): string {
@@ -57,7 +60,8 @@ function describeSecurity(ib: InboundItem, certMap: Map<number, CertificateItem>
   return s.auth_enabled === false ? "无认证" : "成员认证";
 }
 
-export function InboundsPage() {
+export function InboundsPage({ onNavigate }: { onNavigate?: (route: AppRoute) => void }) {
+  const { activeNodeId, activeNode } = useNode();
   const toast = useToast();
   const [inbounds, setInbounds] = useState<InboundItem[]>([]);
   const [certificates, setCertificates] = useState<CertificateItem[]>([]);
@@ -69,12 +73,14 @@ export function InboundsPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<InboundItem | null>(null);
 
+  const nodeOffline = activeNode ? !activeNode.online : false;
+
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
       const [ibRes, certRes, memRes] = await Promise.all([
-        api.listInbounds(),
-        api.listCertificates().catch(() => ({ certificates: [] })),
+        api.listInbounds(activeNodeId),
+        api.listCertificates(activeNodeId).catch(() => ({ certificates: [] })),
         api.listMembers().catch(() => ({ members: [] })),
       ]);
       setInbounds(Array.isArray(ibRes.inbounds) ? ibRes.inbounds : []);
@@ -85,7 +91,7 @@ export function InboundsPage() {
     } finally {
       setLoading(false);
     }
-  }, [toast]);
+  }, [activeNodeId, toast]);
 
   useEffect(() => {
     void loadAll();
@@ -141,6 +147,11 @@ export function InboundsPage() {
 
   return (
     <div className="space-y-5">
+      <NodeScopeBanner
+        onNavigate={onNavigate}
+        offlineHint="当前远程节点离线：您仍可编辑和保存该节点的入站配置，Agent 重新上线后主控将自动推送并热重载。"
+      />
+
       {/* Unified summary strip */}
       <div className="grid divide-y divide-hairline overflow-hidden rounded-lg border border-hairline bg-surface sm:grid-cols-4 sm:divide-x sm:divide-y-0">
         <div className="px-4 py-3">
@@ -390,6 +401,9 @@ export function InboundsPage() {
 
       <InboundModal
         open={modalOpen}
+        nodeId={activeNodeId}
+        nodeName={activeNode?.name}
+        nodeOffline={nodeOffline}
         editing={editing}
         certificates={certificates}
         members={members}

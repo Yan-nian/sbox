@@ -262,7 +262,7 @@ func TestMilestone2CertificatesToolsMembersInboundsAndTraffic(t *testing.T) {
 	}
 
 	// 6. Traffic stats & reset endpoints
-	if err := st.RecordTrafficDeltas(context.Background(), time.Now().UTC(), []store.TrafficDeltaInput{
+	if err := st.RecordTrafficDeltas(context.Background(), 1, time.Now().UTC(), []store.TrafficDeltaInput{
 		{InboundTag: "vless-reality", MemberName: "alice", Upload: 2048, Download: 8192},
 	}); err != nil {
 		t.Fatalf("RecordTrafficDeltas: %v", err)
