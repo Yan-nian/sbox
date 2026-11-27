@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { getBasePath } from "@/lib/basePath";
+import { copyToClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/cn";
 import { formatBytes, formatDateTime, formatSpeed } from "@/lib/format";
 import { useNode } from "@/contexts/NodeContext";
@@ -121,12 +122,12 @@ export function NodesPage({ onNavigate }: NodesPageProps) {
   };
 
   const copyValue = async (key: string, val: string, label: string) => {
-    try {
-      await navigator.clipboard.writeText(val);
+    const ok = await copyToClipboard(val);
+    if (ok) {
       setCopiedKey(key);
       toast.info(`已复制${label}`);
       window.setTimeout(() => setCopiedKey(null), 1600);
-    } catch {
+    } else {
       toast.error("复制失败");
     }
   };

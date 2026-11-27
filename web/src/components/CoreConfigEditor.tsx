@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { AlertCircle, Check, Code2, Copy, RefreshCw, Save } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
+import { copyToClipboard } from "@/lib/clipboard";
 import { useToast } from "@/components/ui/Toast";
 import { Button, Textarea } from "@/components/ui/primitives";
 
@@ -90,12 +91,12 @@ export function CoreConfigEditor({ nodeId }: CoreConfigEditorProps) {
   };
 
   const copyConfig = async () => {
-    try {
-      await navigator.clipboard.writeText(configJson);
+    const ok = await copyToClipboard(configJson);
+    if (ok) {
       setCopied(true);
       toast.info("已复制编译后的 config.json");
       window.setTimeout(() => setCopied(false), 1800);
-    } catch {
+    } else {
       toast.error("复制失败");
     }
   };

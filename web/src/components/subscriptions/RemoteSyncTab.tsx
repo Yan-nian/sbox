@@ -130,7 +130,7 @@ export function RemoteSyncTab() {
     setName(t.name);
     setType(t.type);
     setMemberId(String(t.member_id || ""));
-    setFormat(t.format || "base64");
+    setFormat(t.format || (t.type === "sub_store" ? "uri" : "base64"));
     setMergeMode(t.merge_mode || "replace");
     setAutoPush(t.auto_push !== false);
     setEnabled(t.enabled);
@@ -639,7 +639,13 @@ export function RemoteSyncTab() {
               <Select
                 id="st-type"
                 value={type}
-                onChange={(e) => setType(e.target.value as SyncTargetType)}
+                onChange={(e) => {
+                  const nextType = e.target.value as SyncTargetType;
+                  setType(nextType);
+                  if (nextType === "sub_store") {
+                    setFormat("uri");
+                  }
+                }}
               >
                 <option value="github_gist">GitHub Gist</option>
                 <option value="github_repo">GitHub 私有仓库</option>
@@ -672,7 +678,7 @@ export function RemoteSyncTab() {
                 onChange={(e) => setFormat(e.target.value as SubFormat)}
               >
                 <option value="base64">Base64 URI</option>
-                <option value="uri">明文 URI</option>
+                <option value="uri">明文 URI 列表</option>
                 <option value="singbox">sing-box JSON</option>
                 <option value="clash">Clash Mihomo YAML</option>
               </Select>
@@ -789,35 +795,40 @@ export function RemoteSyncTab() {
             )}
 
             {type === "sub_store" && (
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Field
-                  label="Sub-Store 后端地址（含路径前缀）"
-                  htmlFor="st-ss-url"
-                  hint="例如 https://sub.example.com/your_secret_path"
-                >
-                  <Input
-                    id="st-ss-url"
-                    type="url"
-                    value={subStoreUrl}
-                    onChange={(e) => setSubStoreUrl(e.target.value)}
-                    placeholder="https://sub.example.com/secret"
-                    className="font-mono text-xs"
-                    required
-                  />
-                </Field>
-                <Field
-                  label="Sub-Store 订阅名称（可选）"
-                  htmlFor="st-ss-name"
-                  hint="留空默认 sbox-<instance_id>，幂等创建/更新"
-                >
-                  <Input
-                    id="st-ss-name"
-                    value={subStoreName}
-                    onChange={(e) => setSubStoreName(e.target.value)}
-                    placeholder="sbox-cluster"
-                    className="font-mono text-xs"
-                  />
-                </Field>
+              <div className="space-y-3">
+                <div className="rounded-md border border-accent/35 bg-accent/10 px-3 py-2 text-[11px] leading-relaxed text-ink-secondary">
+                  Sub-Store 推荐使用「明文 URI 列表」或「Clash YAML」，导入后可由 Sub-Store 导出给 Loon / Clash / sing-box 等任意客户端（若填 sing-box JSON 将自动按 URI 节点推送以确保可解析）
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Field
+                    label="Sub-Store 后端地址（含路径前缀）"
+                    htmlFor="st-ss-url"
+                    hint="例如 https://sub.example.com/your_secret_path"
+                  >
+                    <Input
+                      id="st-ss-url"
+                      type="url"
+                      value={subStoreUrl}
+                      onChange={(e) => setSubStoreUrl(e.target.value)}
+                      placeholder="https://sub.example.com/secret"
+                      className="font-mono text-xs"
+                      required
+                    />
+                  </Field>
+                  <Field
+                    label="Sub-Store 订阅名称（可选）"
+                    htmlFor="st-ss-name"
+                    hint="留空默认 sbox-<instance_id>，幂等创建/更新"
+                  >
+                    <Input
+                      id="st-ss-name"
+                      value={subStoreName}
+                      onChange={(e) => setSubStoreName(e.target.value)}
+                      placeholder="sbox-cluster"
+                      className="font-mono text-xs"
+                    />
+                  </Field>
+                </div>
               </div>
             )}
 

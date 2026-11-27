@@ -271,6 +271,11 @@ export interface SettingsUpdateRequest {
   panel_cert_id?: number;
 }
 
+export interface DetectPublicIPResponse {
+  public_ipv4: string;
+  public_ipv6: string;
+}
+
 // --- Milestone 2/3: Certificates & Reality Tools ---
 
 export type CertificateType = "acme_http" | "acme_dns" | "self_signed" | "external";

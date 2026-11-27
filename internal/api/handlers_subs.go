@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -48,7 +49,39 @@ func memberBoundToInbound(ib model.Inbound, memberID int64) bool {
 	return false
 }
 
-func (s *Server) renderMemberSubscription(ctx context.Context, member *model.Member, format string) (*subgen.RenderOutput, error) {
+// extractNonLoopbackHost returns the HTTP request hostname (stripped of port) if it is
+// a usable non-loopback host or IP, otherwise returns empty string.
+func extractNonLoopbackHost(r *http.Request) string {
+	candidates := []string{
+		strings.TrimSpace(r.Header.Get("X-Forwarded-Host")),
+		strings.TrimSpace(r.Host),
+	}
+	for _, raw := range candidates {
+		if raw == "" {
+			continue
+		}
+		if idx := strings.Index(raw, ","); idx >= 0 {
+			raw = strings.TrimSpace(raw[:idx])
+		}
+		host := raw
+		if h, _, err := net.SplitHostPort(raw); err == nil {
+			host = h
+		}
+		host = strings.Trim(strings.TrimSpace(host), "[]")
+		if host == "" || strings.EqualFold(host, "localhost") {
+			continue
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			if ip.IsLoopback() || ip.IsUnspecified() {
+				continue
+			}
+		}
+		return host
+	}
+	return ""
+}
+
+func (s *Server) renderMemberSubscription(ctx context.Context, member *model.Member, format, fallbackLocalHost string) (*subgen.RenderOutput, error) {
 	ps, _ := s.store.GetPanelSettings(ctx)
 	instanceID := strings.TrimSpace(ps.InstanceID)
 	if instanceID == "" {
@@ -69,6 +102,13 @@ func (s *Server) renderMemberSubscription(ctx context.Context, member *model.Mem
 			}
 			if v6 == "" {
 				v6 = strings.TrimSpace(ps.PublicIPv6)
+			}
+			if v4 == "" && v6 == "" && fallbackLocalHost != "" {
+				if ip := net.ParseIP(fallbackLocalHost); ip != nil && ip.To4() == nil {
+					v6 = fallbackLocalHost
+				} else {
+					v4 = fallbackLocalHost
+				}
 			}
 		}
 		subNodes = append(subNodes, subgen.NodeEndpoint{
@@ -180,7 +220,7 @@ func (s *Server) handlePublicSubscription(w http.ResponseWriter, r *http.Request
 		format = subgen.DetectFormatFromUA(r.UserAgent())
 	}
 
-	out, err := s.renderMemberSubscription(ctx, member, format)
+	out, err := s.renderMemberSubscription(ctx, member, format, extractNonLoopbackHost(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to render subscription: "+err.Error())
 		return
@@ -245,7 +285,7 @@ func (s *Server) handleSubscriptionPreview(w http.ResponseWriter, r *http.Reques
 		urlFmt = norm
 	}
 
-	out, err := s.renderMemberSubscription(ctx, member, renderFmt)
+	out, err := s.renderMemberSubscription(ctx, member, renderFmt, extractNonLoopbackHost(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to render subscription preview: "+err.Error())
 		return

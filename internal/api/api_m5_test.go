@@ -835,3 +835,152 @@ func TestMilestone5LocalAndRemoteEncryptedBackupRestore(t *testing.T) {
 		t.Fatalf("expected alice restored from remote GitHub backup: %v", err)
 	}
 }
+
+func TestV102IPDetectHostFallbackAndSubStoreCoercion(t *testing.T) {
+	srv, st, _, _, basePath := newTestServer(t)
+	defer srv.StopAutoSync()
+	token := m5InitAdmin(t, srv, basePath)
+	ctx := context.Background()
+
+	// 1. Mock IPv4 echo endpoints: first returns private ECS VPC IP (must be rejected!), second returns public IP.
+	origV4, origV6 := ipv4EchoEndpoints, ipv6EchoEndpoints
+	defer func() {
+		ipv4EchoEndpoints = origV4
+		ipv6EchoEndpoints = origV6
+	}()
+
+	privSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("172.31.14.12\n"))
+	}))
+	defer privSrv.Close()
+
+	pubSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("188.239.22.220\n"))
+	}))
+	defer pubSrv.Close()
+
+	ipv4EchoEndpoints = []string{privSrv.URL, pubSrv.URL}
+	ipv6EchoEndpoints = nil
+
+	// Create member + inbound while local node public_ipv4 is still empty.
+	aliceRec := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/members", map[string]any{"name": "alice"}, token)
+	var alice model.Member
+	_ = json.Unmarshal(aliceRec.Body.Bytes(), &alice)
+
+	ssKeyRec := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/tools/ss2022-key", map[string]any{"method": "2022-blake3-aes-128-gcm"}, token)
+	var ssKey struct {
+		Key string `json:"key"`
+	}
+	_ = json.Unmarshal(ssKeyRec.Body.Bytes(), &ssKey)
+
+	doJSON(t, srv, http.MethodPost, basePath+"/api/v1/inbounds", map[string]any{
+		"node_id":     1,
+		"name":        "SS Edge",
+		"tag":         "ss-edge",
+		"protocol":    "shadowsocks",
+		"listen_port": 26150,
+		"settings": map[string]any{
+			"method":          "2022-blake3-aes-128-gcm",
+			"server_password": ssKey.Key,
+		},
+	}, token)
+
+	// 2. Request Host fallback when local node public_ipv4 is empty:
+	// non-loopback Host -> used as server host; loopback Host -> ignored (falls back to 127.0.0.1).
+	reqPubHost := httptest.NewRequest(http.MethodGet, basePath+"/sub/"+alice.SubToken+"?format=uri", nil)
+	reqPubHost.Host = "188.239.22.220:18080"
+	recPubHost := httptest.NewRecorder()
+	srv.ServeHTTP(recPubHost, reqPubHost)
+	if recPubHost.Code != http.StatusOK || !strings.Contains(recPubHost.Body.String(), "@188.239.22.220:26150#") {
+		t.Fatalf("expected non-loopback r.Host fallback to 188.239.22.220, got (%d): %s", recPubHost.Code, recPubHost.Body.String())
+	}
+	if strings.Contains(recPubHost.Body.String(), "+") {
+		t.Fatalf("expected RFC 3986 %%20 fragment encoding without '+', got: %s", recPubHost.Body.String())
+	}
+
+	reqLoopHost := httptest.NewRequest(http.MethodGet, basePath+"/sub/"+alice.SubToken+"?format=uri", nil)
+	reqLoopHost.Host = "127.0.0.1:18080"
+	recLoopHost := httptest.NewRecorder()
+	srv.ServeHTTP(recLoopHost, reqLoopHost)
+	if recLoopHost.Code != http.StatusOK || !strings.Contains(recLoopHost.Body.String(), "@127.0.0.1:26150#") {
+		t.Fatalf("expected loopback r.Host ignored, got (%d): %s", recLoopHost.Code, recLoopHost.Body.String())
+	}
+
+	// 3. POST /api/v1/tools/detect-ip with save=false detects 188.239.22.220 without modifying DB.
+	detNoSave := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/tools/detect-ip", map[string]any{"save": false}, token)
+	if detNoSave.Code != http.StatusOK {
+		t.Fatalf("detect-ip failed (%d): %s", detNoSave.Code, detNoSave.Body.String())
+	}
+	var detResp struct {
+		PublicIPv4 string `json:"public_ipv4"`
+		PublicIPv6 string `json:"public_ipv6"`
+	}
+	_ = json.Unmarshal(detNoSave.Body.Bytes(), &detResp)
+	if detResp.PublicIPv4 != "188.239.22.220" {
+		t.Fatalf("expected detected public_ipv4=188.239.22.220, got %+v", detResp)
+	}
+	if n1, _ := st.GetNode(ctx, 1); n1.PublicIPv4 != "" {
+		t.Fatalf("expected node 1 public_ipv4 still empty when save=false, got %q", n1.PublicIPv4)
+	}
+
+	// 4. AutoPopulateLocalPublicIP persists 188.239.22.220 into both nodes[1] and settings.
+	srv.AutoPopulateLocalPublicIP(ctx)
+	n1, _ := st.GetNode(ctx, 1)
+	ps, _ := st.GetPanelSettings(ctx)
+	if n1.PublicIPv4 != "188.239.22.220" || ps.PublicIPv4 != "188.239.22.220" {
+		t.Fatalf("AutoPopulateLocalPublicIP did not persist IPv4: node=%q settings=%q", n1.PublicIPv4, ps.PublicIPv4)
+	}
+
+	// 5. Sub-Store format defaults to "uri" when omitted, AND format="singbox" coerces pushed content to plain URI lines!
+	var pushedContent string
+	subStoreSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/subs":
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": []any{}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/subs":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			pushedContent, _ = body["content"].(string)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "success"})
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer subStoreSrv.Close()
+
+	// Default format when omitted on sub_store creation -> "uri"
+	defCreate := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/sync-targets", map[string]any{
+		"name":      "SS Default Fmt",
+		"type":      "sub_store",
+		"member_id": alice.ID,
+		"config":    map[string]any{"sub_store_url": subStoreSrv.URL, "sub_store_name": "sub-def"},
+	}, token)
+	if defCreate.Code != http.StatusCreated {
+		t.Fatalf("create sub_store default fmt failed (%d): %s", defCreate.Code, defCreate.Body.String())
+	}
+	var defTarget model.SyncTargetView
+	_ = json.Unmarshal(defCreate.Body.Bytes(), &defTarget)
+	if defTarget.Format != "uri" {
+		t.Fatalf("expected default sub_store format='uri', got %q", defTarget.Format)
+	}
+
+	// Explicit format="singbox" on sub_store target -> pushes plain URI lines (NOT JSON!) with real public IP!
+	sbCreate := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/sync-targets", map[string]any{
+		"name":      "SS Singbox Coerced",
+		"type":      "sub_store",
+		"member_id": alice.ID,
+		"format":    "singbox",
+		"config":    map[string]any{"sub_store_url": subStoreSrv.URL, "sub_store_name": "hw-sbox"},
+	}, token)
+	var sbTarget model.SyncTargetView
+	_ = json.Unmarshal(sbCreate.Body.Bytes(), &sbTarget)
+
+	pushRec := doJSON(t, srv, http.MethodPost, basePath+"/api/v1/sync-targets/"+strconvFormatInt(sbTarget.ID)+"/push", nil, token)
+	if pushRec.Code != http.StatusOK {
+		t.Fatalf("push coerced sub_store failed (%d): %s", pushRec.Code, pushRec.Body.String())
+	}
+	if !strings.HasPrefix(pushedContent, "ss://") || !strings.Contains(pushedContent, "@188.239.22.220:26150#") {
+		t.Fatalf("expected coerced Sub-Store content to be plain ss:// URI with real public IP, got:\n%s", pushedContent)
+	}
+}

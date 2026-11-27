@@ -4,13 +4,16 @@ import {
   Copy,
   KeyRound,
   Lock,
+  Radar,
   Save,
   ShieldCheck,
   ShieldOff,
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { buildAppUrl, getBasePath, normalizeBasePath } from "@/lib/basePath";
+import { copyToClipboard } from "@/lib/clipboard";
 import { useAuth } from "@/contexts/AuthContext";
+import { useNode } from "@/contexts/NodeContext";
 import { useToast } from "@/components/ui/Toast";
 import { Badge, Button, Field, Input, Panel, Select } from "@/components/ui/primitives";
 import { QrCode } from "@/components/QrCode";
@@ -19,11 +22,13 @@ import type { CertificateItem, SettingsData, TOTPSetupResponse } from "@/types/a
 
 export function SettingsPage() {
   const { refresh: refreshAuth } = useAuth();
+  const { refreshNodes } = useNode();
   const toast = useToast();
 
   // Global settings form
   const [loading, setLoading] = useState(true);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [detectingIp, setDetectingIp] = useState(false);
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [instanceId, setInstanceId] = useState("");
   const [webBasePath, setWebBasePath] = useState("");
@@ -116,10 +121,36 @@ export function SettingsPage() {
       }
 
       toast.success("系统设置已保存");
+      void refreshNodes();
     } catch (err) {
       toast.error("保存设置失败", err instanceof ApiError ? err.message : undefined);
     } finally {
       setSavingSettings(false);
+    }
+  };
+
+  const handleDetectPublicIp = async () => {
+    setDetectingIp(true);
+    try {
+      const res = await api.detectPublicIP(false);
+      const found: string[] = [];
+      if (res.public_ipv4) {
+        setPublicIpv4(res.public_ipv4);
+        found.push(`IPv4: ${res.public_ipv4}`);
+      }
+      if (res.public_ipv6) {
+        setPublicIpv6(res.public_ipv6);
+        found.push(`IPv6: ${res.public_ipv6}`);
+      }
+      if (found.length > 0) {
+        toast.success("已探测到宿主机公网 IP", `${found.join(" · ")}（点击保存系统设置生效）`);
+      } else {
+        toast.error("未能探测到公网 IP", "请确认宿主机具备外网连通性或手动输入");
+      }
+    } catch (err) {
+      toast.error("自动探测公网 IP 失败", err instanceof ApiError ? err.message : undefined);
+    } finally {
+      setDetectingIp(false);
     }
   };
 
@@ -209,12 +240,12 @@ export function SettingsPage() {
 
   const copySecret = async () => {
     if (!totpSetup?.secret) return;
-    try {
-      await navigator.clipboard.writeText(totpSetup.secret);
+    const ok = await copyToClipboard(totpSetup.secret);
+    if (ok) {
       setCopiedSecret(true);
       toast.info("已复制 TOTP 手动密钥");
       window.setTimeout(() => setCopiedSecret(false), 1800);
-    } catch {
+    } else {
       toast.error("复制失败");
     }
   };
@@ -279,15 +310,29 @@ export function SettingsPage() {
               <Field
                 label="公网 IPv4 覆写"
                 htmlFor="set-ipv4"
-                hint="留空时自动探测宿主机公网 IPv4"
+                hint="留空时自动探测宿主机公网 IPv4；也可点击右侧立即探测"
               >
-                <Input
-                  id="set-ipv4"
-                  value={publicIpv4}
-                  onChange={(e) => setPublicIpv4(e.target.value)}
-                  placeholder="自动探测"
-                  className="font-mono"
-                />
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="set-ipv4"
+                    value={publicIpv4}
+                    onChange={(e) => setPublicIpv4(e.target.value)}
+                    placeholder="自动探测"
+                    className="flex-1 font-mono"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="md"
+                    loading={detectingIp}
+                    onClick={() => void handleDetectPublicIp()}
+                    className="shrink-0"
+                    title="从宿主机主动探测公网 IPv4 / IPv6"
+                  >
+                    <Radar className="h-3.5 w-3.5" />
+                    自动探测
+                  </Button>
+                </div>
               </Field>
 
               <Field

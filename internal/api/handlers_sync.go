@@ -163,7 +163,6 @@ func (s *Server) handleCreateSyncTarget(w http.ResponseWriter, r *http.Request) 
 
 	t := &model.SyncTarget{
 		Enabled:  true,
-		Format:   "base64",
 		AutoPush: false,
 	}
 	if req.Name != nil {
@@ -178,8 +177,12 @@ func (s *Server) handleCreateSyncTarget(w http.ResponseWriter, r *http.Request) 
 	if req.MemberID != nil {
 		t.MemberID = *req.MemberID
 	}
-	if req.Format != nil {
+	if req.Format != nil && strings.TrimSpace(*req.Format) != "" {
 		t.Format = *req.Format
+	} else if strings.EqualFold(strings.TrimSpace(t.Type), "sub_store") {
+		t.Format = "uri"
+	} else {
+		t.Format = "base64"
 	}
 	if req.MergeMode != nil {
 		t.MergeMode = *req.MergeMode
@@ -305,7 +308,12 @@ func (s *Server) executeSyncTargetPush(ctx context.Context, t *model.SyncTarget)
 			Message: fmt.Sprintf("bound member (id=%d) not found: %v", t.MemberID, err),
 		}
 	} else {
-		out, renderErr := s.renderMemberSubscription(ctx, member, t.Format)
+		// Real Sub-Store `source: "local"` parses plain URI lines or Clash YAML, NOT full sing-box client JSON.
+		renderFormat := t.Format
+		if t.Type == "sub_store" && renderFormat != "clash" {
+			renderFormat = "uri"
+		}
+		out, renderErr := s.renderMemberSubscription(ctx, member, renderFormat, "")
 		if renderErr != nil {
 			res = syncer.PushResult{
 				Success: false,
@@ -326,7 +334,7 @@ func (s *Server) executeSyncTargetPush(ctx context.Context, t *model.SyncTarget)
 				ID:           t.ID,
 				Name:         t.Name,
 				Type:         t.Type,
-				Format:       t.Format,
+				Format:       renderFormat,
 				MergeMode:    t.MergeMode,
 				InstanceID:   instanceID,
 				Token:        t.Config.Token,

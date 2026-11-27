@@ -78,7 +78,7 @@ func renderVLESSURI(rn resolvedNode) string {
 		url.PathEscape(strings.TrimSpace(rn.Member.UUID)),
 		formatHostPort(rn.Host, rn.Port),
 		q.Encode(),
-		url.QueryEscape(rn.Name),
+		url.PathEscape(rn.Name),
 	)
 }
 
@@ -106,7 +106,7 @@ func renderHysteria2URI(rn resolvedNode) string {
 		url.QueryEscape(strings.TrimSpace(rn.Member.Password)),
 		formatHostPort(rn.Host, rn.Port),
 		q.Encode(),
-		url.QueryEscape(rn.Name),
+		url.PathEscape(rn.Name),
 	)
 }
 
@@ -131,7 +131,7 @@ func renderTUICURI(rn resolvedNode) string {
 		url.QueryEscape(strings.TrimSpace(rn.Member.Password)),
 		formatHostPort(rn.Host, rn.Port),
 		q.Encode(),
-		url.QueryEscape(rn.Name),
+		url.PathEscape(rn.Name),
 	)
 }
 
@@ -148,7 +148,7 @@ func renderAnyTLSURI(rn resolvedNode) string {
 		url.QueryEscape(strings.TrimSpace(rn.Member.Password)),
 		formatHostPort(rn.Host, rn.Port),
 		q.Encode(),
-		url.QueryEscape(rn.Name),
+		url.PathEscape(rn.Name),
 	)
 }
 
@@ -158,7 +158,7 @@ func renderShadowsocksURI(rn resolvedNode) string {
 	return fmt.Sprintf("ss://%s@%s#%s",
 		userInfo,
 		formatHostPort(rn.Host, rn.Port),
-		url.QueryEscape(rn.Name),
+		url.PathEscape(rn.Name),
 	)
 }
 
@@ -179,7 +179,7 @@ func renderTrojanURI(rn resolvedNode) string {
 		url.QueryEscape(strings.TrimSpace(rn.Member.Password)),
 		formatHostPort(rn.Host, rn.Port),
 		q.Encode(),
-		url.QueryEscape(rn.Name),
+		url.PathEscape(rn.Name),
 	)
 }
 
@@ -201,7 +201,7 @@ func renderShadowTLSURI(rn resolvedNode) string {
 			url.PathEscape(strings.TrimSpace(rn.Member.UUID)),
 			formatHostPort(rn.Host, rn.Port),
 			q.Encode(),
-			url.QueryEscape(rn.Name),
+			url.PathEscape(rn.Name),
 		)
 	}
 
@@ -215,7 +215,7 @@ func renderShadowTLSURI(rn resolvedNode) string {
 		userInfo,
 		formatHostPort(rn.Host, rn.Port),
 		q.Encode(),
-		url.QueryEscape(rn.Name),
+		url.PathEscape(rn.Name),
 	)
 }
 
@@ -227,7 +227,7 @@ func renderSocksURI(rn resolvedNode) string {
 	return fmt.Sprintf("socks5://%s%s#%s",
 		auth,
 		formatHostPort(rn.Host, rn.Port),
-		url.QueryEscape(rn.Name),
+		url.PathEscape(rn.Name),
 	)
 }
 
@@ -239,7 +239,7 @@ func renderHTTPURI(rn resolvedNode) string {
 	return fmt.Sprintf("http://%s%s#%s",
 		auth,
 		formatHostPort(rn.Host, rn.Port),
-		url.QueryEscape(rn.Name),
+		url.PathEscape(rn.Name),
 	)
 }
 

@@ -18,6 +18,7 @@ import {
   Timer,
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
+import { copyToClipboard } from "@/lib/clipboard";
 import { formatBytes, formatSpeed, formatUptime } from "@/lib/format";
 import { useNode } from "@/contexts/NodeContext";
 import { useToast } from "@/components/ui/Toast";
@@ -63,12 +64,12 @@ export function DashboardPage({ live, onNavigate }: DashboardPageProps) {
   };
 
   const copyValue = async (key: string, val: string) => {
-    try {
-      await navigator.clipboard.writeText(val);
+    const ok = await copyToClipboard(val);
+    if (ok) {
       setCopiedKey(key);
       toast.info("已复制到剪贴板", val);
       window.setTimeout(() => setCopiedKey(null), 1800);
-    } catch {
+    } else {
       toast.error("复制失败", "当前浏览器上下文不支持剪贴板写入");
     }
   };

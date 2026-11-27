@@ -205,6 +205,7 @@ func (s *Server) buildAPIRouter() chi.Router {
 			r.Post("/tools/reality-keypair", s.handleToolRealityKeypair)
 			r.Post("/tools/reality-probe", s.handleToolRealityProbe)
 			r.Post("/tools/ss2022-key", s.handleToolSS2022Key)
+			r.Post("/tools/detect-ip", s.handleToolDetectIP)
 
 			// Milestone 2/3: Global Members (changes sync to all online nodes)
 			r.Get("/members", s.handleListMembers)

@@ -19,7 +19,7 @@ export function QrCode({ value, size = 184, label = "TOTP 二维码" }: QrCodePr
     }
     QRCode.toDataURL(value, {
       width: size * 2,
-      margin: 2,
+      margin: 4,
       color: {
         dark: "#0c0f14",
         light: "#ffffff",

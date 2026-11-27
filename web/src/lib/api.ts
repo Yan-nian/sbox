@@ -15,6 +15,7 @@ import type {
   CreateNodeResponse,
   CreateSelfSignedCertRequest,
   DashboardSummary,
+  DetectPublicIPResponse,
   ExtraOutboundItem,
   InboundDefaultsResponse,
   InboundItem,
@@ -387,6 +388,12 @@ export const api = {
     request<{ key: string }>("/tools/ss2022-key", {
       method: "POST",
       body: { method },
+    }),
+
+  detectPublicIP: (save = false) =>
+    request<DetectPublicIPResponse>("/tools/detect-ip", {
+      method: "POST",
+      body: { save },
     }),
 
   // Members (Global)

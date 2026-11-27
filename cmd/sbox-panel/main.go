@@ -398,6 +398,9 @@ func runServe(args []string) error {
 		log.Printf("warn: build initial sing-box config: %v", err)
 	}
 
+	// Asynchronously auto-detect local public IPv4/IPv6 if unset (eliminates 127.0.0.1 on NAT cloud VPS)
+	go apiServer.AutoPopulateLocalPublicIP(ctx)
+
 	hub.Start(ctx, clashAddr, clashSecret)
 	defer hub.Stop()
 

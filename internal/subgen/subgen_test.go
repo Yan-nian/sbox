@@ -330,10 +330,13 @@ func TestRenderAllProtocolsAndFormats(t *testing.T) {
 	if !strings.HasPrefix(vlessReality.URI, "vless://11111111-2222-3333-4444-555555555555@203.0.113.10:443?") {
 		t.Errorf("unexpected VLESS Reality URI: %s", vlessReality.URI)
 	}
-	for _, want := range []string{"security=reality", "pbk=PUBKEY_XYZ123", "sid=a1b2c3d4", "flow=xtls-rprx-vision", "sni=www.microsoft.com"} {
+	for _, want := range []string{"security=reality", "pbk=PUBKEY_XYZ123", "sid=a1b2c3d4", "flow=xtls-rprx-vision", "sni=www.microsoft.com", "#%5BJP-Tokyo%5D%20VLESS%20Reality"} {
 		if !strings.Contains(vlessReality.URI, want) {
 			t.Errorf("VLESS Reality URI missing %q: %s", want, vlessReality.URI)
 		}
+	}
+	if idx := strings.LastIndex(vlessReality.URI, "#"); idx >= 0 && strings.Contains(vlessReality.URI[idx:], "+") {
+		t.Errorf("URI fragment must encode spaces as %%20, not '+': %s", vlessReality.URI)
 	}
 
 	// Check Hysteria2 primary + extra entries
